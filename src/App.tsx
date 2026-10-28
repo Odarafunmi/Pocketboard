@@ -74,6 +74,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -756,6 +757,7 @@ function App() {
             onAddPath={addDrawnPath}
             onOpenArtboards={openArtboardManager}
             onZoom={(delta) => setZoom((value) => clamp(value + delta, 5, 6400))}
+            onSetZoom={(value) => setZoom(clamp(value, 5, 6400))}
             onUpdateGuide={(id, position) => setCanvasGuides((guides) => guides.map((guide) => guide.id === id ? { ...guide, position } : guide))}
             onDeleteGuide={(id) => setCanvasGuides((guides) => guides.filter((guide) => guide.id !== id))}
             onUpdateLive={(id, patch) => updateLayer(id, patch, false)}
@@ -1270,6 +1272,7 @@ interface CanvasProps {
   onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
   onOpenArtboards: () => void
   onZoom: (delta: number) => void
+  onSetZoom: (zoom: number) => void
   onUpdateGuide: (id: string, position: number) => void
   onDeleteGuide: (id: string) => void
   onUpdateLive: (id: string, patch: Partial<DesignLayer>) => void
@@ -1281,6 +1284,7 @@ type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
 type TransformState = {
   mode: 'move' | 'resize' | 'rotate' | 'corner' | 'crop'
   id: string
+  pointerId: number
   startClientX: number
   startClientY: number
   original: DesignLayer
@@ -1291,18 +1295,42 @@ type TransformState = {
 
 type SmartGuideState = { x?: number; y?: number }
 
+type PinchState = {
+  pointerIds: [number, number]
+  startDistance: number
+  startZoom: number
+  focusX: number
+  focusY: number
+}
+
+type PendingPinchFocus = {
+  clientX: number
+  clientY: number
+  focusX: number
+  focusY: number
+}
+
 function Canvas(props: CanvasProps) {
   const onAddPath = props.onAddPath
   const transformRef = useRef<TransformState | null>(null)
+  const transformCleanupRef = useRef<(() => void) | null>(null)
   const layersRef = useRef(props.layers)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const touchPointersRef = useRef(new Map<number, Point>())
+  const pinchRef = useRef<PinchState | null>(null)
+  const pendingPinchFocusRef = useRef<PendingPinchFocus | null>(null)
+  const zoomRef = useRef(props.zoom)
   const longPressTimerRef = useRef<number | null>(null)
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null)
   const longPressPointerRef = useRef<number | null>(null)
   const longPressTriggeredRef = useRef(false)
+  const cancelLongPressRef = useRef<(() => void) | null>(null)
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
+  const [isPinching, setIsPinching] = useState(false)
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
   const draftPointsRef = useRef<Point[]>([])
+  zoomRef.current = props.zoom
   useEffect(() => { layersRef.current = props.layers }, [props.layers])
   useEffect(() => { draftPointsRef.current = draftPoints }, [draftPoints])
   useEffect(() => { setDraftPoints([]) }, [props.activeTool])
@@ -1311,6 +1339,22 @@ function Canvas(props: CanvasProps) {
     window.addEventListener('resize', onResize)
     return () => window.removeEventListener('resize', onResize)
   }, [])
+  useEffect(() => () => {
+    transformCleanupRef.current?.()
+    cancelLongPressRef.current?.()
+  }, [])
+  useLayoutEffect(() => {
+    const pending = pendingPinchFocusRef.current
+    const scroller = scrollRef.current
+    const svg = props.artboardRef.current
+    if (!pending || !scroller || !svg) return
+    const rect = svg.getBoundingClientRect()
+    const focusClientX = rect.left + pending.focusX * rect.width
+    const focusClientY = rect.top + pending.focusY * rect.height
+    scroller.scrollLeft += focusClientX - pending.clientX
+    scroller.scrollTop += focusClientY - pending.clientY
+    pendingPinchFocusRef.current = null
+  }, [props.artboardRef, props.zoom])
 
   const pointerToCanvas = useCallback((clientX: number, clientY: number) => {
     const svg = props.artboardRef.current
@@ -1392,23 +1436,95 @@ function Canvas(props: CanvasProps) {
     return { x: nextX, y: nextY }
   }
 
+  const onCanvasPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch') return
+    const pointers = touchPointersRef.current
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* pointer capture is best-effort on older mobile browsers */ }
+
+    if (pointers.size < 2 || pinchRef.current) return
+    const entries = [...pointers.entries()].slice(0, 2) as [[number, Point], [number, Point]]
+    const [[firstId, first], [secondId, second]] = entries
+    const svg = props.artboardRef.current
+    if (!svg) return
+
+    transformCleanupRef.current?.()
+    cancelLongPressRef.current?.()
+    setSmartGuides({})
+    const rect = svg.getBoundingClientRect()
+    const midpointX = (first.x + second.x) / 2
+    const midpointY = (first.y + second.y) / 2
+    pinchRef.current = {
+      pointerIds: [firstId, secondId],
+      startDistance: Math.max(8, Math.hypot(second.x - first.x, second.y - first.y)),
+      startZoom: zoomRef.current,
+      focusX: (midpointX - rect.left) / Math.max(1, rect.width),
+      focusY: (midpointY - rect.top) / Math.max(1, rect.height),
+    }
+    setIsPinching(true)
+    for (const pointerId of [firstId, secondId]) {
+      try { event.currentTarget.setPointerCapture(pointerId) } catch { /* continue without capture */ }
+    }
+    event.preventDefault()
+  }
+
+  const onCanvasPointerMoveCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch' || !touchPointersRef.current.has(event.pointerId)) return
+    touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+    const pinch = pinchRef.current
+    if (!pinch || !pinch.pointerIds.includes(event.pointerId)) return
+    const first = touchPointersRef.current.get(pinch.pointerIds[0])
+    const second = touchPointersRef.current.get(pinch.pointerIds[1])
+    if (!first || !second) return
+
+    const distance = Math.max(8, Math.hypot(second.x - first.x, second.y - first.y))
+    const midpointX = (first.x + second.x) / 2
+    const midpointY = (first.y + second.y) / 2
+    const nextZoom = clamp(pinch.startZoom * distance / pinch.startDistance, 5, 6400)
+    pendingPinchFocusRef.current = {
+      clientX: midpointX,
+      clientY: midpointY,
+      focusX: pinch.focusX,
+      focusY: pinch.focusY,
+    }
+    props.onSetZoom(nextZoom)
+    event.preventDefault()
+  }
+
+  const finishCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== 'touch') return
+    touchPointersRef.current.delete(event.pointerId)
+    if (pinchRef.current?.pointerIds.includes(event.pointerId)) {
+      pinchRef.current = null
+      setIsPinching(false)
+    }
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    } catch { /* the browser may already have released it */ }
+  }
+
   const startTransform = (event: ReactPointerEvent, layer: DesignLayer, mode: TransformState['mode'], handle?: TransformState['handle']) => {
     const allowed = (props.activeTool === 'select' && ['move', 'resize', 'rotate'].includes(mode))
       || (props.activeTool === 'corner' && mode === 'corner')
       || (props.activeTool === 'crop' && mode === 'crop')
-    if (layer.locked || !allowed) return
+    if (layer.locked || !allowed || pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
     event.stopPropagation()
     event.preventDefault()
+    transformCleanupRef.current?.()
     props.onSelect(layer.id)
+    const pointerId = event.pointerId
+    const captureTarget = event.currentTarget as Element
+    try { captureTarget.setPointerCapture(pointerId) } catch { /* window listeners remain as a fallback */ }
     transformRef.current = {
-      mode, id: layer.id, startClientX: event.clientX, startClientY: event.clientY,
+      mode, id: layer.id, pointerId, startClientX: event.clientX, startClientY: event.clientY,
       original: { ...layer }, snapshot: cloneLayers(layersRef.current), handle, moved: false,
     }
 
     const onMove = (moveEvent: PointerEvent) => {
       const state = transformRef.current
       const svg = props.artboardRef.current
-      if (!state || !svg) return
+      if (!state || state.pointerId !== moveEvent.pointerId || !svg || pinchRef.current) return
+      moveEvent.preventDefault()
       const rect = svg.getBoundingClientRect()
       const dx = (moveEvent.clientX - state.startClientX) * props.documentMeta.width / rect.width
       const dy = (moveEvent.clientY - state.startClientY) * props.documentMeta.height / rect.height
@@ -1486,18 +1602,37 @@ function Canvas(props: CanvasProps) {
         })
       }
     }
-    const onUp = () => {
+
+    let finished = false
+    function finish(commit: boolean) {
+      if (finished) return
+      finished = true
       const state = transformRef.current
-      if (state?.moved) props.onCommitSnapshot(state.snapshot)
-      transformRef.current = null
+      if (state?.pointerId === pointerId) {
+        if (state.moved && commit) props.onCommitSnapshot(state.snapshot)
+        else if (state.moved) props.onUpdateLive(state.id, state.original)
+        transformRef.current = null
+      }
       setSmartGuides({})
+      try {
+        if (captureTarget.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId)
+      } catch { /* the pointer may already be released */ }
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      if (transformCleanupRef.current === cancelTransform) transformCleanupRef.current = null
     }
-    window.addEventListener('pointermove', onMove)
+    function onUp(upEvent: PointerEvent) {
+      if (upEvent.pointerId === pointerId) finish(true)
+    }
+    function onCancel(cancelEvent: PointerEvent) {
+      if (cancelEvent.pointerId === pointerId) finish(false)
+    }
+    function cancelTransform() { finish(false) }
+    transformCleanupRef.current = cancelTransform
+    window.addEventListener('pointermove', onMove, { passive: false })
     window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onUp)
+    window.addEventListener('pointercancel', onCancel)
   }
 
   const startBrushStroke = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -1545,7 +1680,7 @@ function Canvas(props: CanvasProps) {
   }
 
   const startArtboardLongPress = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (event.pointerType !== 'touch' || !['select', 'hand'].includes(props.activeTool)) return
+    if (event.pointerType !== 'touch' || pinchRef.current || touchPointersRef.current.size > 1 || !['select', 'hand'].includes(props.activeTool)) return
     longPressStartRef.current = { x: event.clientX, y: event.clientY }
     longPressPointerRef.current = event.pointerId
     longPressTriggeredRef.current = false
@@ -1558,6 +1693,7 @@ function Canvas(props: CanvasProps) {
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
+      if (cancelLongPressRef.current === cleanup) cancelLongPressRef.current = null
     }
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== longPressPointerRef.current) return
@@ -1569,19 +1705,31 @@ function Canvas(props: CanvasProps) {
       const shouldOpen = longPressTriggeredRef.current
       if (shouldOpen) {
         upEvent.preventDefault()
-        const transform = transformRef.current
-        if (transform?.moved) {
-          props.onUpdateLive(transform.id, transform.original)
-          transform.moved = false
-        }
+        transformCleanupRef.current?.()
       }
       cleanup()
-      // Open after release so the touch's synthetic click cannot immediately dismiss the sheet.
-      if (shouldOpen) window.setTimeout(props.onOpenArtboards, 0)
+      if (shouldOpen) {
+        // Pointer capture can retarget the synthetic click to the newly opened scrim.
+        // Consume that click so a completed long-press leaves the manager open.
+        const pointerId = upEvent.pointerId
+        const suppressSyntheticClick = (clickEvent: MouseEvent) => {
+          const clickPointerId = 'pointerId' in clickEvent ? Number(clickEvent.pointerId) : pointerId
+          if (clickPointerId !== pointerId) return
+          clickEvent.preventDefault()
+          clickEvent.stopImmediatePropagation()
+          window.removeEventListener('click', suppressSyntheticClick, true)
+        }
+        window.addEventListener('click', suppressSyntheticClick, true)
+        window.setTimeout(() => {
+          props.onOpenArtboards()
+          window.setTimeout(() => window.removeEventListener('click', suppressSyntheticClick, true), 250)
+        }, 0)
+      }
     }
     const onCancel = (cancelEvent: PointerEvent) => {
       if (cancelEvent.pointerId === longPressPointerRef.current) cleanup()
     }
+    cancelLongPressRef.current = cleanup
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null
       longPressTriggeredRef.current = true
@@ -1603,6 +1751,10 @@ function Canvas(props: CanvasProps) {
   }
 
   const onBackgroundPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) {
+      event.preventDefault()
+      return
+    }
     if (props.activeTool === 'brush') {
       startBrushStroke(event)
       return
@@ -1650,7 +1802,14 @@ function Canvas(props: CanvasProps) {
   const fitWidth = Math.max(120, Math.min(510, (viewport.height - (compactLayout ? compactVerticalSpace : 200)) * aspect, compactLayout ? viewport.width - 42 : canvasWidth - 96))
   const fitHeight = fitWidth / aspect
   return (
-    <div className="canvas-scroll">
+    <div
+      ref={scrollRef}
+      className={`canvas-scroll ${isPinching ? 'is-pinching' : ''}`}
+      onPointerDownCapture={onCanvasPointerDownCapture}
+      onPointerMoveCapture={onCanvasPointerMoveCapture}
+      onPointerUpCapture={finishCanvasPointer}
+      onPointerCancelCapture={finishCanvasPointer}
+    >
       <div className="artboard-zoom-space" style={{ width: fitWidth * zoomRatio, height: fitHeight * zoomRatio }}>
       <div className="artboard-scale" style={{ width: fitWidth, height: fitHeight, transform: `scale(${zoomRatio})`, '--zoom-ratio': zoomRatio, '--artboard-aspect': aspect } as CSSProperties}>
         {props.guidesVisible && <><div className="canvas-ruler ruler-horizontal"><span>0</span><span>{round(props.documentMeta.width / 2)}</span><span>{props.documentMeta.width}</span></div><div className="canvas-ruler ruler-vertical"><span>0</span><span>{round(props.documentMeta.height / 2)}</span><span>{props.documentMeta.height}</span></div></>}

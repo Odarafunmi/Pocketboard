@@ -893,6 +893,14 @@ button:disabled {
   place-items: center;
   padding: 66px 64px 78px;
   overscroll-behavior: none;
+  touch-action: none;
+}
+
+.artboard,
+.artboard [data-layer],
+.selection-overlay,
+.selection-overlay [data-resize-handle] {
+  touch-action: none;
 }
 
 .artboard-zoom-space {
@@ -907,6 +915,11 @@ button:disabled {
   aspect-ratio: var(--artboard-aspect);
   transform-origin: top left;
   transition: transform 220ms ease-in-out;
+}
+
+.canvas-scroll.is-pinching .artboard-scale {
+  transition: none;
+  will-change: transform;
 }
 
 .artboard {

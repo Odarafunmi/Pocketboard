@@ -28,7 +28,7 @@ npm run preview
 - Non-destructive image repositioning, scaling, and rectangle, rounded, ellipse, or star masks, with a dedicated compact-screen workflow
 - Artboard alignment controls, snapping smart guides, draggable ruler guides, and adjustable layout grids
 - Multiple artboards with switching, adding, deleting, local persistence, project-file backup, and a touch-first manager available by tap or long-press
-- Dedicated zoom tool and controls from 5% to 6400%
+- Dedicated zoom tool, controls, and two-finger workspace pinch zoom from 5% to 6400%
 - Contextual properties for typography, fills, strokes, position, opacity, and artboard settings
 - Undo/redo, keyboard shortcuts, local auto-save, light/dark themes, and reduced-motion support
 - Home and New design screens with project cards, presets, print units, and custom dimensions
