@@ -303,7 +303,12 @@ function App() {
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable
       if (editing) return
       const command = event.metaKey || event.ctrlKey
-      if (command && event.key.toLowerCase() === 'z') {
+      if (command && event.key.toLowerCase() === 'n') {
+        event.preventDefault()
+        setView('new')
+        setMobileSheet(null)
+        window.history.replaceState(null, '', `${window.location.pathname}#new`)
+      } else if (command && event.key.toLowerCase() === 'z') {
         event.preventDefault()
         if (event.shiftKey) redo()
         else undo()
@@ -447,6 +452,7 @@ function App() {
         onUndo={undo}
         onRedo={redo}
         onHome={() => navigate('home')}
+        onNew={() => navigate('new')}
         onExport={() => setExportOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
@@ -578,7 +584,8 @@ function App() {
           {mobileSheet === 'more' && (
             <MoreMenu
               onAction={(action) => {
-                if (action === 'export') setExportOpen(true)
+                if (action === 'new') navigate('new')
+                else if (action === 'export') setExportOpen(true)
                 else showToast(action === 'grid' ? 'Layout grid shown' : action === 'rulers' ? 'Rulers shown' : 'Action completed')
                 setMobileSheet(null)
               }}
@@ -614,6 +621,7 @@ interface TopBarProps {
   onUndo: () => void
   onRedo: () => void
   onHome: () => void
+  onNew: () => void
   onExport: () => void
   theme: Theme
   onToggleTheme: () => void
@@ -627,6 +635,10 @@ function TopBar(props: TopBarProps) {
         <button className="brand-button" onClick={props.onHome} aria-label="Go to home" title="Home">
           <LogoMark />
           <span className="brand-word">Pocketboard</span>
+        </button>
+        <button className="editor-new-button" onClick={props.onNew} aria-label="Create new design" title="New design · Ctrl N">
+          <Plus size={15} />
+          <span>New</span>
         </button>
       </div>
       <div className="topbar-document-zone">
@@ -1314,6 +1326,7 @@ function ShapesGrid({ onAdd }: { onAdd: (type: LayerType) => void }) {
 
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
+    { id: 'new', label: 'New design', icon: <Plus /> },
     { id: 'grid', label: 'Layout grid', icon: <Grid3X3 /> },
     { id: 'rulers', label: 'Rulers and guides', icon: <Ruler /> },
     { id: 'settings', label: 'Design settings', icon: <Settings2 /> },

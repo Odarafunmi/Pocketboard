@@ -329,8 +329,39 @@ button:disabled {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  padding-left: 13px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 11px 0 13px;
   border-right: 1px solid var(--border);
+}
+
+.editor-new-button {
+  height: 31px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-primary);
+  background: var(--surface-input);
+  font-size: 11px;
+  font-weight: 600;
+  transition: border-color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast);
+}
+
+.editor-new-button:hover {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-subtle);
+}
+
+.editor-new-button:active {
+  transform: scale(.97);
+}
+
+.editor-new-button svg {
+  stroke-width: 2;
 }
 
 .brand-button,
