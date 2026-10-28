@@ -78,6 +78,7 @@ import {
   useState,
   type ChangeEvent,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
@@ -136,9 +137,9 @@ function App() {
     return stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
   })
   const [view, setView] = useState<View>(() => {
-    if (window.location.hash === '#home') return 'home'
+    if (window.location.hash === '#editor') return 'editor'
     if (window.location.hash === '#new') return 'new'
-    return 'editor'
+    return 'home'
   })
   const [documentMeta, setDocumentMeta] = useState<DesignDocument>(() => {
     try {
@@ -235,7 +236,7 @@ function App() {
 
   const navigate = (nextView: View) => {
     setView(nextView)
-    const hash = nextView === 'editor' ? '' : `#${nextView}`
+    const hash = nextView === 'home' ? '' : `#${nextView}`
     window.history.replaceState(null, '', `${window.location.pathname}${hash}`)
     setMobileSheet(null)
   }
@@ -370,6 +371,15 @@ function App() {
     ;[next[index], next[target]] = [next[target], next[index]]
     commitLayers(next)
   }, [commitLayers, selectedId])
+
+  const reorderLayersFromPanel = useCallback((topToBottomIds: string[]) => {
+    const current = layersRef.current
+    if (topToBottomIds.length !== current.length || new Set(topToBottomIds).size !== current.length) return
+    const byId = new Map(current.map((layer) => [layer.id, layer]))
+    const next = topToBottomIds.map((id) => byId.get(id)).filter((layer): layer is DesignLayer => Boolean(layer)).reverse()
+    if (next.length !== current.length || next.every((layer, index) => layer.id === current[index].id)) return
+    commitLayers(next, 'Layer order updated')
+  }, [commitLayers])
 
   const alignSelected = useCallback((alignment: 'left' | 'h-center' | 'right' | 'top' | 'v-center' | 'bottom') => {
     if (!selectedId) return
@@ -715,6 +725,7 @@ function App() {
             onDelete={deleteSelected}
             onMoveUp={() => reorderSelected('up')}
             onMoveDown={() => reorderSelected('down')}
+            onReorder={reorderLayersFromPanel}
           />
         </aside>
 
@@ -831,6 +842,7 @@ function App() {
               onDelete={deleteSelected}
               onMoveUp={() => reorderSelected('up')}
               onMoveDown={() => reorderSelected('down')}
+              onReorder={reorderLayersFromPanel}
               insideSheet
             />
           )}
@@ -1062,12 +1074,111 @@ interface LayersPanelProps {
   onDelete: () => void
   onMoveUp: () => void
   onMoveDown: () => void
+  onReorder: (topToBottomIds: string[]) => void
   insideSheet?: boolean
 }
 
 function LayersPanel(props: LayersPanelProps) {
   const [query, setQuery] = useState('')
-  const visibleLayers = [...props.layers].reverse().filter((layer) => layer.name.toLowerCase().includes(query.toLowerCase()))
+  const [dragOrder, setDragOrder] = useState<string[] | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const [reorderAnnouncement, setReorderAnnouncement] = useState('')
+  const listRef = useRef<HTMLDivElement>(null)
+  const dragOrderRef = useRef<string[] | null>(null)
+  const dragCleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => dragCleanupRef.current?.(), [])
+
+  const panelOrder = dragOrder || [...props.layers].reverse().map((layer) => layer.id)
+  const byId = new Map(props.layers.map((layer) => [layer.id, layer]))
+  const visibleLayers = panelOrder
+    .map((id) => byId.get(id))
+    .filter((layer): layer is DesignLayer => Boolean(layer))
+    .filter((layer) => layer.name.toLowerCase().includes(query.toLowerCase()))
+
+  const announceOrder = (id: string, order: string[]) => {
+    const layer = byId.get(id)
+    if (layer) setReorderAnnouncement(`${layer.name} moved to position ${order.indexOf(id) + 1} of ${order.length}.`)
+  }
+
+  const startReorder = (event: ReactPointerEvent<HTMLButtonElement>, layer: DesignLayer) => {
+    event.stopPropagation()
+    if (query) return
+    event.preventDefault()
+    const pointerId = event.pointerId
+    const order = [...props.layers].reverse().map((item) => item.id)
+    dragOrderRef.current = order
+    setDragOrder(order)
+    setDraggingId(layer.id)
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      dragCleanupRef.current = null
+    }
+    const finish = (commit: boolean) => {
+      const finalOrder = dragOrderRef.current
+      cleanup()
+      dragOrderRef.current = null
+      setDragOrder(null)
+      setDraggingId(null)
+      if (commit && finalOrder && finalOrder.some((id, index) => id !== order[index])) {
+        props.onReorder(finalOrder)
+        announceOrder(layer.id, finalOrder)
+      }
+    }
+    const updateOrderAtPoint = (clientX: number, clientY: number) => {
+      const row = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest<HTMLElement>('.layer-row[data-layer-id]')
+      const targetId = row?.dataset.layerId
+      const current = dragOrderRef.current
+      if (!targetId || !current || !row || !listRef.current?.contains(row) || targetId === layer.id) return
+      const from = current.indexOf(layer.id)
+      const to = current.indexOf(targetId)
+      if (from < 0 || to < 0 || from === to) return
+      const next = [...current]
+      const [moved] = next.splice(from, 1)
+      next.splice(to, 0, moved)
+      dragOrderRef.current = next
+      setDragOrder(next)
+    }
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return
+      moveEvent.preventDefault()
+      const list = listRef.current
+      if (list) {
+        const bounds = list.getBoundingClientRect()
+        if (moveEvent.clientY < bounds.top + 40) list.scrollTop -= 18
+        else if (moveEvent.clientY > bounds.bottom - 40) list.scrollTop += 18
+      }
+      updateOrderAtPoint(moveEvent.clientX, moveEvent.clientY)
+    }
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return
+      updateOrderAtPoint(upEvent.clientX, upEvent.clientY)
+      finish(true)
+    }
+    const onCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === pointerId) finish(false)
+    }
+    dragCleanupRef.current = cleanup
+    window.addEventListener('pointermove', onMove, { passive: false })
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+  }
+
+  const reorderWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, layer: DesignLayer) => {
+    if (query || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+    event.preventDefault()
+    event.stopPropagation()
+    const order = [...props.layers].reverse().map((item) => item.id)
+    const from = order.indexOf(layer.id)
+    const to = from + (event.key === 'ArrowUp' ? -1 : 1)
+    if (from < 0 || to < 0 || to >= order.length) return
+    ;[order[from], order[to]] = [order[to], order[from]]
+    props.onReorder(order)
+    announceOrder(layer.id, order)
+  }
+
   return (
     <div className={`panel-inner layers-inner ${props.insideSheet ? 'inside-sheet' : ''}`}>
       {!props.insideSheet && (
@@ -1085,16 +1196,26 @@ function LayersPanel(props: LayersPanelProps) {
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search layers" aria-label="Search layers" />
         {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
       </label>
-      <div className="layer-list" role="listbox" aria-label="Canvas layers">
+      <div className="layer-order-hint"><GripVertical size={12} /><span>{query ? 'Clear search to reorder' : 'Drag layers to reorder'}</span></div>
+      <div ref={listRef} className={`layer-list ${draggingId ? 'is-reordering' : ''}`} role="listbox" aria-label="Canvas layers">
         {visibleLayers.length ? visibleLayers.map((layer) => (
           <div
             key={layer.id}
             role="option"
             aria-selected={props.selectedId === layer.id}
-            className={`layer-row ${props.selectedId === layer.id ? 'selected' : ''} ${!layer.visible ? 'muted' : ''}`}
+            data-layer-id={layer.id}
+            className={`layer-row ${props.selectedId === layer.id ? 'selected' : ''} ${!layer.visible ? 'muted' : ''} ${draggingId === layer.id ? 'dragging' : ''}`}
             onClick={() => props.onSelect(layer.id)}
           >
-            <button className="row-grip" aria-label={`Reorder ${layer.name}`} onClick={(event) => event.stopPropagation()}><GripVertical size={14} /></button>
+            <button
+              className="row-grip"
+              disabled={Boolean(query)}
+              aria-label={`Reorder ${layer.name}; drag or use the arrow keys`}
+              title={query ? 'Clear search to reorder layers' : `Drag to reorder ${layer.name}`}
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => startReorder(event, layer)}
+              onKeyDown={(event) => reorderWithKeyboard(event, layer)}
+            ><GripVertical size={14} /></button>
             <LayerThumbnail layer={layer} />
             <span className="layer-name">{layer.name}</span>
             <button className="row-action" aria-label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`} onClick={(event) => { event.stopPropagation(); props.onToggleVisible(layer) }}>
@@ -1108,6 +1229,7 @@ function LayersPanel(props: LayersPanelProps) {
           <div className="empty-layers"><Layers3 size={28} /><p>{query ? 'No layers match your search.' : 'No layers yet.'}</p><button className="button secondary" onClick={props.onAdd}>Add a shape</button></div>
         )}
       </div>
+      <span className="visually-hidden" role="status" aria-live="polite">{reorderAnnouncement}</span>
       <div className="panel-footer-actions">
         <IconButton label="Group selection"><Group /></IconButton>
         <IconButton label="Duplicate" shortcut="Ctrl D" onClick={props.onDuplicate} disabled={!props.selectedId}><Copy /></IconButton>
@@ -1154,6 +1276,8 @@ interface CanvasProps {
   onCommitSnapshot: (layers: DesignLayer[]) => void
 }
 
+type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+
 type TransformState = {
   mode: 'move' | 'resize' | 'rotate' | 'corner' | 'crop'
   id: string
@@ -1161,7 +1285,7 @@ type TransformState = {
   startClientY: number
   original: DesignLayer
   snapshot: DesignLayer[]
-  handle?: 'nw' | 'ne' | 'sw' | 'se'
+  handle?: ResizeHandle
   moved: boolean
 }
 
@@ -1296,22 +1420,53 @@ function Canvas(props: CanvasProps) {
           y: clamp(position.y, -state.original.height + 10, props.documentMeta.height - 10),
         })
       } else if (state.mode === 'resize') {
-        const minimum = 20
-        let x = state.original.x
-        let y = state.original.y
-        let width = state.original.width
-        let height = Math.max(state.original.height, state.original.type === 'line' ? 0 : minimum)
-        if (state.handle?.includes('e')) width = Math.max(minimum, state.original.width + dx)
-        if (state.handle?.includes('s')) height = Math.max(state.original.type === 'line' ? 0 : minimum, state.original.height + dy)
-        if (state.handle?.includes('w')) {
-          width = Math.max(minimum, state.original.width - dx)
-          x = state.original.x + (state.original.width - width)
+        const original = state.original
+        const handle = state.handle || 'se'
+        const minimumWidth = 20
+        const minimumHeight = original.type === 'line' ? 0 : 20
+        const angle = original.rotation * Math.PI / 180
+        const cos = Math.cos(angle)
+        const sin = Math.sin(angle)
+        const localDx = dx * cos + dy * sin
+        const localDy = -dx * sin + dy * cos
+        let width = original.width
+        let height = original.height
+        const isCorner = handle.length === 2
+        const preserveProportions = isCorner && original.type !== 'line' && original.width > 0 && original.height > 0
+
+        if (preserveProportions) {
+          const horizontalDirection = handle.includes('e') ? 1 : -1
+          const verticalDirection = handle.includes('s') ? 1 : -1
+          const vectorX = horizontalDirection * original.width
+          const vectorY = verticalDirection * original.height
+          const scaleFromPointer = 1 + (localDx * vectorX + localDy * vectorY) / (vectorX * vectorX + vectorY * vectorY)
+          const minimumScale = Math.max(minimumWidth / original.width, minimumHeight / original.height)
+          const scale = Math.max(minimumScale, scaleFromPointer)
+          width = original.width * scale
+          height = original.height * scale
+        } else {
+          if (handle.includes('e')) width = Math.max(minimumWidth, original.width + localDx)
+          if (handle.includes('w')) width = Math.max(minimumWidth, original.width - localDx)
+          if (handle.includes('s')) height = Math.max(minimumHeight, original.height + localDy)
+          if (handle.includes('n')) height = Math.max(minimumHeight, original.height - localDy)
         }
-        if (state.handle?.includes('n')) {
-          height = Math.max(minimum, state.original.height - dy)
-          y = state.original.y + (state.original.height - height)
-        }
-        props.onUpdateLive(state.id, { x, y, width, height })
+
+        const shiftX = handle.includes('e')
+          ? (width - original.width) / 2
+          : handle.includes('w') ? -(width - original.width) / 2 : 0
+        const shiftY = handle.includes('s')
+          ? (height - original.height) / 2
+          : handle.includes('n') ? -(height - original.height) / 2 : 0
+        const worldShiftX = shiftX * cos - shiftY * sin
+        const worldShiftY = shiftX * sin + shiftY * cos
+        const originalCenterX = original.x + original.width / 2
+        const originalCenterY = original.y + original.height / 2
+        props.onUpdateLive(state.id, {
+          x: originalCenterX + worldShiftX - width / 2,
+          y: originalCenterY + worldShiftY - height / 2,
+          width,
+          height,
+        })
       } else if (state.mode === 'rotate') {
         const point = pointerToCanvas(moveEvent.clientX, moveEvent.clientY)
         const cx = state.original.x + state.original.width / 2
@@ -1530,6 +1685,7 @@ function Canvas(props: CanvasProps) {
             <SelectionOverlay
               layer={props.selected}
               mode={props.activeTool}
+              handleScale={props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)}
               onResize={(event, handle) => startTransform(event, props.selected!, 'resize', handle)}
               onRotate={(event) => startTransform(event, props.selected!, 'rotate')}
               onCorner={(event) => startTransform(event, props.selected!, 'corner')}
@@ -1692,10 +1848,11 @@ function starPoints(cx: number, cy: number, outer: number, inner: number) {
   }).join(' ')
 }
 
-function SelectionOverlay({ layer, mode, onResize, onRotate, onCorner, onCrop }: {
+function SelectionOverlay({ layer, mode, handleScale, onResize, onRotate, onCorner, onCrop }: {
   layer: DesignLayer
   mode: Tool
-  onResize: (event: ReactPointerEvent, handle: 'nw' | 'ne' | 'sw' | 'se') => void
+  handleScale: number
+  onResize: (event: ReactPointerEvent, handle: ResizeHandle) => void
   onRotate: (event: ReactPointerEvent) => void
   onCorner: (event: ReactPointerEvent) => void
   onCrop: (event: ReactPointerEvent) => void
@@ -1704,11 +1861,15 @@ function SelectionOverlay({ layer, mode, onResize, onRotate, onCorner, onCrop }:
   const cx = layer.x + layer.width / 2
   const cy = layer.y + height / 2
   const transform = `rotate(${layer.rotation} ${cx} ${cy})`
-  const handles: { id: 'nw' | 'ne' | 'sw' | 'se'; x: number; y: number; cursor: string }[] = [
+  const handles: { id: ResizeHandle; x: number; y: number; cursor: string; side?: 'horizontal' | 'vertical' }[] = [
+    { id: 'n', x: cx, y: layer.y, cursor: 'ns-resize', side: 'horizontal' },
+    { id: 'e', x: layer.x + layer.width, y: cy, cursor: 'ew-resize', side: 'vertical' },
+    { id: 's', x: cx, y: layer.y + height, cursor: 'ns-resize', side: 'horizontal' },
+    { id: 'w', x: layer.x, y: cy, cursor: 'ew-resize', side: 'vertical' },
     { id: 'nw', x: layer.x, y: layer.y, cursor: 'nwse-resize' },
     { id: 'ne', x: layer.x + layer.width, y: layer.y, cursor: 'nesw-resize' },
-    { id: 'sw', x: layer.x, y: layer.y + height, cursor: 'nesw-resize' },
     { id: 'se', x: layer.x + layer.width, y: layer.y + height, cursor: 'nwse-resize' },
+    { id: 'sw', x: layer.x, y: layer.y + height, cursor: 'nesw-resize' },
   ]
   const standard = mode === 'select'
   const cornerMode = mode === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))
@@ -1719,12 +1880,17 @@ function SelectionOverlay({ layer, mode, onResize, onRotate, onCorner, onCrop }:
       {standard && <>
         <line x1={cx} y1={layer.y} x2={cx} y2={layer.y - 34} stroke={ACCENT} strokeWidth="1.5" vectorEffect="non-scaling-stroke" pointerEvents="none" />
         <circle cx={cx} cy={layer.y - 42} r="9" fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" onPointerDown={onRotate} style={{ cursor: 'grab', pointerEvents: 'all' }} />
-        {handles.map((handle) => (
-          <g key={handle.id} onPointerDown={(event) => onResize(event, handle.id)} style={{ cursor: handle.cursor, pointerEvents: 'all' }}>
-            <circle cx={handle.x} cy={handle.y} r="22" fill="transparent" />
-            <rect x={handle.x - 7} y={handle.y - 7} width="14" height="14" rx="2" fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />
-          </g>
-        ))}
+        {handles.map((handle) => {
+          const width = (handle.side === 'vertical' ? 8 : handle.side === 'horizontal' ? 20 : 10) * handleScale
+          const handleHeight = (handle.side === 'vertical' ? 20 : handle.side === 'horizontal' ? 8 : 10) * handleScale
+          const hitSize = 44 * handleScale
+          return (
+            <g key={handle.id} data-resize-handle={handle.id} data-resize-mode={handle.side ? 'side' : 'proportional'} onPointerDown={(event) => onResize(event, handle.id)} style={{ cursor: handle.cursor, pointerEvents: 'all' }}>
+              <rect x={handle.x - hitSize / 2} y={handle.y - hitSize / 2} width={hitSize} height={hitSize} fill="transparent" />
+              <rect x={handle.x - width / 2} y={handle.y - handleHeight / 2} width={width} height={handleHeight} rx={2.5 * handleScale} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+            </g>
+          )
+        })}
       </>}
       {cornerMode && <g onPointerDown={onCorner} style={{ cursor: 'ew-resize', pointerEvents: 'all' }}>
         <circle cx={layer.x + clamp(layer.radius || 18, 14, layer.width / 2)} cy={layer.y + clamp(layer.radius || 18, 14, height / 2)} r="22" fill="transparent" />
@@ -2561,15 +2727,6 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
           <div><span className="eyebrow">Your workspace</span><h1>Designs</h1><p>Everything stays on this device, ready whenever you are.</p></div>
           <div className="home-actions"><button className="button secondary" onClick={() => importInputRef.current?.click()}><Upload size={17} /> Import project</button><button className="button primary" onClick={onNew}><Plus size={18} /> New design</button></div>
         </section>
-        <section className="quick-start-section">
-          <div className="section-title-row"><h2>Quick start</h2><button onClick={onNew}>View all sizes <ChevronRight size={15} /></button></div>
-          <div className="quick-start-grid">
-            <button onClick={onNew}><span className="quick-icon square"><LayoutGrid /></span><div><strong>Instagram post</strong><small>1080 × 1080 px</small></div><Plus /></button>
-            <button onClick={onNew}><span className="quick-icon portrait"><Smartphone /></span><div><strong>Story or reel</strong><small>1080 × 1920 px</small></div><Plus /></button>
-            <button onClick={onNew}><span className="quick-icon document"><FileText /></span><div><strong>A4 document</strong><small>210 × 297 mm</small></div><Plus /></button>
-            <button onClick={onNew}><span className="quick-icon custom"><SlidersHorizontal /></span><div><strong>Custom size</strong><small>Set your own dimensions</small></div><Plus /></button>
-          </div>
-        </section>
         <section className="recent-section">
           <div className="section-title-row"><div><h2>Recent designs</h2><span>{hasCurrent ? 4 : 3} designs</span></div><div className="view-actions"><IconButton label="Grid view" active><LayoutGrid /></IconButton><IconButton label="Search designs"><Search /></IconButton></div></div>
           <div className="project-grid">
@@ -2578,6 +2735,15 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
             <ProjectCard name="Sonder identity" meta="Edited yesterday" variant="sonder" onClick={onOpenSample} />
             <ProjectCard name="Lagos / 26" meta="Edited 4 days ago" variant="lagos" onClick={onOpenSample} />
             <button className="new-project-card" onClick={onNew}><span><Plus /></span><strong>Create a design</strong><small>Start from a preset or custom size</small></button>
+          </div>
+        </section>
+        <section className="quick-start-section">
+          <div className="section-title-row"><h2>Quick start</h2><button onClick={onNew}>View all sizes <ChevronRight size={15} /></button></div>
+          <div className="quick-start-grid">
+            <button onClick={onNew}><span className="quick-icon square"><LayoutGrid /></span><div><strong>Instagram post</strong><small>1080 × 1080 px</small></div><Plus /></button>
+            <button onClick={onNew}><span className="quick-icon portrait"><Smartphone /></span><div><strong>Story or reel</strong><small>1080 × 1920 px</small></div><Plus /></button>
+            <button onClick={onNew}><span className="quick-icon document"><FileText /></span><div><strong>A4 document</strong><small>210 × 297 mm</small></div><Plus /></button>
+            <button onClick={onNew}><span className="quick-icon custom"><SlidersHorizontal /></span><div><strong>Custom size</strong><small>Set your own dimensions</small></div><Plus /></button>
           </div>
         </section>
         <div className="backup-reminder"><span><FolderOpen size={19} /></span><div><strong>Keep a backup of your work</strong><p>Your designs are stored on this device only. Export a backup to keep them safe.</p></div><button className="button secondary">Learn how</button></div>
