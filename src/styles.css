@@ -3781,7 +3781,10 @@ button:disabled {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   caret-color: var(--accent);
   resize: none;
-  touch-action: manipulation;
+  touch-action: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
   white-space: pre-wrap;
 }
 
