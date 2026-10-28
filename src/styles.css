@@ -678,6 +678,21 @@ button:disabled {
   color: var(--text-tertiary);
 }
 
+.layer-order-hint {
+  min-height: 25px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-tertiary);
+  font-size: 9px;
+  line-height: 13px;
+}
+
+.layer-order-hint svg {
+  flex: 0 0 auto;
+}
+
 .search-field button {
   width: 22px;
   height: 22px;
@@ -738,6 +753,32 @@ button:disabled {
   height: 32px;
   opacity: .5;
   cursor: grab;
+  touch-action: none;
+}
+
+.row-grip:active {
+  cursor: grabbing;
+}
+
+.row-grip:disabled {
+  opacity: .2;
+  cursor: not-allowed;
+}
+
+.layer-list.is-reordering {
+  cursor: grabbing;
+  overscroll-behavior: contain;
+}
+
+.layer-list.is-reordering .layer-row {
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), opacity var(--motion-fast);
+}
+
+.layer-row.dragging {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-subtle);
+  box-shadow: 0 3px 10px rgba(0,0,0,.12);
+  opacity: .72;
 }
 
 .row-action {

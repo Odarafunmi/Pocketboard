@@ -18,9 +18,10 @@ npm run preview
 
 ## Included in this prototype
 
+- Workspace-first launch with recent designs, quick-start presets, and project import
 - Responsive editor layouts for desktop, tablet, portrait phone, and short-screen landscape use
-- Interactive SVG artboard with object selection, moving, resizing, and rotation
-- Shape and text tools, image import, layers, visibility, lock, reorder, duplicate, and delete
+- Interactive SVG artboard with object selection, moving, rotation, proportional corner resizing, and independent side resizing
+- Shape and text tools, image import, layers, visibility, lock, drag or keyboard reordering, duplicate, and delete
 - Pen and freehand brush tools with editable colour, width, smoothing, and open or closed paths
 - Linear and radial gradients, document swatches, and native screen eyedropper support
 - Rectangles, ellipses, stars, adjustable polygons, triangles, diamonds, arrows, hearts, and interactive corner editing
