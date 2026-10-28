@@ -35,7 +35,12 @@ export interface GradientFill {
 
 export type MaskType = 'none' | 'ellipse' | 'rounded' | 'star'
 export type MaskBrushMode = 'hide' | 'restore'
-export type ShapeKind = 'regular' | 'diamond' | 'arrow' | 'heart'
+export type ShapeKind =
+  | 'regular' | 'diamond' | 'arrow' | 'heart' | 'starburst' | 'sunburst'
+  | 'explosion' | 'lightning' | 'cloud' | 'button' | 'tag' | 'badge' | 'frame'
+  | 'callout' | 'quote-bubble' | 'speech-bubble' | 'pie' | 'donut' | 'megaphone'
+  | 'ribbon' | 'banner' | 'rhombus' | 'trapezoid' | 'stamp' | 'stamp-rectangle' | 'seal'
+  | 'certificate' | 'label' | 'gear' | 'map-pin' | 'shield'
 
 export interface MaskBrushStroke {
   points: Point[]
@@ -63,12 +68,14 @@ export interface DesignLayer {
   radius?: number
   sides?: number
   shapeKind?: ShapeKind
+  burstInset?: number
   points?: Point[]
   closed?: boolean
   smoothing?: number
   text?: string
   fontSize?: number
   textScaleX?: number
+  textWrap?: boolean
   fontWeight?: number
   fontFamily?: string
   letterSpacing?: number
