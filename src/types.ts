@@ -68,6 +68,7 @@ export interface DesignLayer {
   smoothing?: number
   text?: string
   fontSize?: number
+  textScaleX?: number
   fontWeight?: number
   fontFamily?: string
   letterSpacing?: number
