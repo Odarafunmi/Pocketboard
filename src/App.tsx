@@ -255,7 +255,7 @@ function App() {
   const showToast = useCallback((message: string) => {
     setToast(message)
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 3000)
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 1600)
   }, [])
 
   const navigate = (nextView: View) => {
