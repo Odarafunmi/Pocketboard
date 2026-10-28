@@ -84,6 +84,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './data'
 import type {
   ArtboardSnapshot,
@@ -121,6 +122,8 @@ const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 const round = (value: number) => Math.round(value)
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+const closestEventElement = (target: EventTarget | null, selector: string) => target instanceof Element ? target.closest(selector) : null
+const isTextEditorTarget = (target: EventTarget | null) => Boolean(closestEventElement(target, '.text-editor-overlay'))
 
 function useMedia(query: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
@@ -252,7 +255,7 @@ function App() {
   const showToast = useCallback((message: string) => {
     setToast(message)
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
-    toastTimerRef.current = window.setTimeout(() => setToast(null), 3000)
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 1600)
   }, [])
 
   const navigate = (nextView: View) => {
@@ -1514,6 +1517,14 @@ function Canvas(props: CanvasProps) {
     }
   }, [props.artboardRef, props.documentMeta.height, props.documentMeta.width])
 
+  const beginTextEditingWithFocus = (id: string) => {
+    // Keep the state change and focus inside the initiating pointer event. Mobile
+    // Safari only opens its software keyboard for focus caused by that gesture.
+    flushSync(() => props.onBeginTextEdit(id))
+    const textarea = props.artboardRef.current?.querySelector<HTMLTextAreaElement>('.text-editor-overlay textarea')
+    textarea?.focus({ preventScroll: true })
+  }
+
   const finishPenPath = useCallback((closed = false) => {
     const points = draftPointsRef.current
     if (points.length >= 2) onAddPath(points, 'path', closed)
@@ -1585,7 +1596,7 @@ function Canvas(props: CanvasProps) {
   }
 
   const onCanvasPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType !== 'touch') return
+    if (event.pointerType !== 'touch' || isTextEditorTarget(event.target)) return
     const pointers = touchPointersRef.current
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
     try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* pointer capture is best-effort on older mobile browsers */ }
@@ -1777,7 +1788,7 @@ function Canvas(props: CanvasProps) {
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
       if (transformCleanupRef.current === cancelTransform) transformCleanupRef.current = null
-      if (textToEdit) props.onBeginTextEdit(textToEdit)
+      if (textToEdit) beginTextEditingWithFocus(textToEdit)
     }
     function onUp(upEvent: PointerEvent) {
       if (upEvent.pointerId === pointerId) finish(true)
@@ -1879,7 +1890,8 @@ function Canvas(props: CanvasProps) {
   }
 
   const startArtboardLongPress = (event: ReactPointerEvent<SVGSVGElement>) => {
-    if (event.pointerType !== 'touch' || pinchRef.current || touchPointersRef.current.size > 1 || !['select', 'hand'].includes(props.activeTool)) return
+    const isObjectInteraction = Boolean(closestEventElement(event.target, 'g[data-layer], .selection-overlay'))
+    if (event.pointerType !== 'touch' || isTextEditorTarget(event.target) || isObjectInteraction || pinchRef.current || touchPointersRef.current.size > 1 || !['select', 'hand'].includes(props.activeTool)) return
     longPressStartRef.current = { x: event.clientX, y: event.clientY }
     longPressPointerRef.current = event.pointerId
     longPressTriggeredRef.current = false
@@ -1957,7 +1969,7 @@ function Canvas(props: CanvasProps) {
     if (layer.type !== 'text' || layer.locked) return
     event.stopPropagation()
     event.preventDefault()
-    props.onBeginTextEdit(layer.id)
+    beginTextEditingWithFocus(layer.id)
   }
 
   const onBackgroundPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -1993,22 +2005,11 @@ function Canvas(props: CanvasProps) {
       return
     }
     if (props.activeTool === 'text') {
+      event.preventDefault()
+      event.stopPropagation()
       const point = pointerToCanvas(event.clientX, event.clientY)
       const id = props.onAddLayer('text', point)
-      const pointerId = event.pointerId
-      const beginOnRelease = (upEvent: PointerEvent) => {
-        if (upEvent.pointerId !== pointerId) return
-        window.removeEventListener('pointerup', beginOnRelease)
-        window.removeEventListener('pointercancel', cancelOnRelease)
-        props.onBeginTextEdit(id)
-      }
-      const cancelOnRelease = (cancelEvent: PointerEvent) => {
-        if (cancelEvent.pointerId !== pointerId) return
-        window.removeEventListener('pointerup', beginOnRelease)
-        window.removeEventListener('pointercancel', cancelOnRelease)
-      }
-      window.addEventListener('pointerup', beginOnRelease)
-      window.addEventListener('pointercancel', cancelOnRelease)
+      beginTextEditingWithFocus(id)
       return
     }
     if (['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(props.activeTool)) {
@@ -2220,7 +2221,8 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
     const textarea = textareaRef.current
     if (!textarea) return
     textarea.focus({ preventScroll: true })
-    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    if (textarea.value === 'Type something') textarea.setSelectionRange(0, textarea.value.length)
+    else textarea.setSelectionRange(textarea.value.length, textarea.value.length)
   }, [])
 
   const fontSize = layer.fontSize || 32
@@ -2237,7 +2239,12 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
         <textarea
           ref={textareaRef}
           value={value}
+          data-text-editor="true"
           aria-label={`Edit ${layer.name}`}
+          inputMode="text"
+          autoCapitalize="sentences"
+          autoCorrect="on"
+          spellCheck
           style={{
             color: layer.fill,
             fontFamily: layer.fontFamily || 'Inter',
@@ -2248,7 +2255,17 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
             textAlign: layer.textAlign || 'left',
           }}
           onChange={(event) => updateValue(event.target.value)}
-          onPointerDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => {
+            event.stopPropagation()
+            event.currentTarget.focus({ preventScroll: true })
+          }}
+          onPointerUp={(event) => event.stopPropagation()}
+          onTouchStart={(event) => {
+            event.stopPropagation()
+            event.currentTarget.focus({ preventScroll: true })
+          }}
+          onTouchEnd={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
           onDoubleClick={(event) => event.stopPropagation()}
           onBlur={onFinish}
           onKeyDown={(event) => {

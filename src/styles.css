@@ -1782,8 +1782,8 @@ button:disabled {
 .toast {
   position: fixed;
   z-index: 200;
+  top: 72px;
   left: 50%;
-  bottom: 24px;
   min-width: 260px;
   min-height: 44px;
   padding: 7px 8px 7px 11px;
@@ -1829,7 +1829,7 @@ button:disabled {
 
 @keyframes fade-in { from { opacity: 0; } }
 @keyframes sheet-in { from { transform: translateY(100%); } }
-@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, -8px); } }
 
 /* Export dialog */
 
@@ -3422,7 +3422,7 @@ button:disabled {
   .mini-swatch { width: 16px; height: 16px; }
 
   .toast {
-    bottom: calc(78px + env(safe-area-inset-bottom));
+    top: calc(64px + env(safe-area-inset-top));
     width: calc(100vw - 28px);
     min-width: 0;
   }
@@ -3781,7 +3781,10 @@ button:disabled {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   caret-color: var(--accent);
   resize: none;
-  touch-action: manipulation;
+  touch-action: auto;
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
   white-space: pre-wrap;
 }
 
