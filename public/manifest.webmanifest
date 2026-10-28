@@ -1,0 +1,12 @@
+{
+  "name": "Pocketboard",
+  "short_name": "Pocketboard",
+  "description": "A focused, touch-first design workspace.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f4f5",
+  "theme_color": "#f4f4f5",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
