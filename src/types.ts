@@ -1,6 +1,39 @@
-export type Tool = 'select' | 'hand' | 'rectangle' | 'ellipse' | 'text' | 'image' | 'star' | 'line'
+export type Tool =
+  | 'select'
+  | 'hand'
+  | 'rectangle'
+  | 'ellipse'
+  | 'polygon'
+  | 'text'
+  | 'image'
+  | 'star'
+  | 'line'
+  | 'pen'
+  | 'brush'
+  | 'corner'
+  | 'zoom'
+  | 'crop'
 
-export type LayerType = 'rectangle' | 'ellipse' | 'text' | 'image' | 'star' | 'line'
+export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
+
+export interface Point {
+  x: number
+  y: number
+}
+
+export interface GradientStop {
+  offset: number
+  color: string
+}
+
+export interface GradientFill {
+  type: 'linear' | 'radial'
+  angle: number
+  stops: GradientStop[]
+}
+
+export type MaskType = 'none' | 'ellipse' | 'rounded' | 'star'
+export type ShapeKind = 'regular' | 'diamond' | 'arrow' | 'heart'
 
 export interface DesignLayer {
   id: string
@@ -15,9 +48,16 @@ export interface DesignLayer {
   visible: boolean
   locked: boolean
   fill: string
+  fillType?: 'solid' | 'linear' | 'radial'
+  gradient?: GradientFill
   stroke: string
   strokeWidth: number
   radius?: number
+  sides?: number
+  shapeKind?: ShapeKind
+  points?: Point[]
+  closed?: boolean
+  smoothing?: number
   text?: string
   fontSize?: number
   fontWeight?: number
@@ -26,6 +66,10 @@ export interface DesignLayer {
   lineHeight?: number
   textAlign?: 'left' | 'center' | 'right'
   src?: string
+  mask?: MaskType
+  imageOffsetX?: number
+  imageOffsetY?: number
+  imageScale?: number
 }
 
 export interface DesignDocument {
@@ -35,6 +79,19 @@ export interface DesignDocument {
   dpi: number
   background: string
   presetName: string
+}
+
+export interface ArtboardSnapshot {
+  id: string
+  name: string
+  document: DesignDocument
+  layers: DesignLayer[]
+}
+
+export interface CanvasGuide {
+  id: string
+  axis: 'x' | 'y'
+  position: number
 }
 
 export type View = 'editor' | 'home' | 'new'
