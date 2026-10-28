@@ -786,6 +786,7 @@ function App() {
     else if (action === 'more') setMobileSheet('more')
     else if (action === 'properties' || action === 'align' || action === 'arrange') setMobileSheet('properties')
     else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
+    else if (action === 'finish-text') finishTextEditing()
     else if (action === 'corners') setActiveTool('corner')
     else if (action === 'duplicate') duplicateSelected()
     else if (action === 'delete') deleteSelected()
@@ -965,6 +966,7 @@ function App() {
       <MobileToolbar
         activeTool={activeTool}
         selected={selected}
+        editingText={Boolean(editingTextId)}
         maskBrushMode={maskBrushMode}
         onAction={handleMobileToolAction}
       />
@@ -2026,8 +2028,7 @@ function Canvas(props: CanvasProps) {
       event.preventDefault()
       event.stopPropagation()
       const point = pointerToCanvas(event.clientX, event.clientY)
-      const id = props.onAddLayer('text', point)
-      beginTextEditingWithFocus(id)
+      props.onAddLayer('text', point)
       return
     }
     if (['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(props.activeTool)) {
@@ -2881,12 +2882,13 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
 
 type MobileToolAction =
   | 'select' | 'object-select' | 'mask-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
-  | 'properties' | 'edit-text' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
+  | 'properties' | 'edit-text' | 'finish-text' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
-function MobileToolbar({ activeTool, selected, maskBrushMode, onAction }: {
+function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAction }: {
   activeTool: Tool
   selected: DesignLayer | null
+  editingText: boolean
   maskBrushMode: MaskBrushMode
   onAction: (action: MobileToolAction) => void
 }) {
@@ -2907,7 +2909,9 @@ function MobileToolbar({ activeTool, selected, maskBrushMode, onAction }: {
     const supportsCorners = selected.type === 'rectangle' || (selected.type === 'polygon' && (selected.shapeKind === 'regular' || selected.shapeKind === 'diamond'))
     if (selected.type === 'text') {
       items = [
-        { label: 'Edit text', icon: <Type />, action: 'edit-text' },
+        editingText
+          ? { label: 'Done', icon: <Check />, action: 'finish-text', active: true }
+          : { label: 'Edit text', icon: <Type />, action: 'edit-text' },
         { label: 'Style', icon: <SlidersHorizontal />, action: 'properties' },
         { label: 'Align', icon: <AlignCenter />, action: 'align' },
         { label: 'Mask', icon: <Brush />, action: 'mask-brush' },
@@ -2952,7 +2956,7 @@ function MobileToolbar({ activeTool, selected, maskBrushMode, onAction }: {
 
   return (
     <nav className={`mobile-toolbar ${selected ? 'selection-toolbar' : ''}`} aria-label={selected ? `${selected.name} actions` : 'Design tools'}>
-      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
+      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onPointerDown={item.action === 'finish-text' ? (event) => event.preventDefault() : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
     </nav>
   )
 }

@@ -21,7 +21,7 @@ npm run preview
 - Workspace-first launch with recent designs, quick-start presets, and project import
 - Responsive editor layouts for desktop, tablet, portrait phone, and short-screen landscape use
 - Interactive SVG artboard with object selection, moving, rotation, proportional corner resizing, and independent side resizing
-- Shape and text tools: tap text to select and transform it, double-tap or double-click to edit its content, and drag side or corner handles to resize it; newly inserted text opens for editing immediately
+- Shape and text tools: tap text to select and transform it, double-tap or double-click to edit its content, then use Done or tap outside to return to transform controls; drag side or corner handles to resize text
 - Image import, layers, visibility, lock, drag or keyboard reordering, duplicate, and delete
 - Pen paths plus a non-destructive hide/restore mask brush with object selection, adjustable size, clearing, and undo
 - Selection-aware mobile actions for shape corners, fills, alignment, image crops, masks, text styling, duplication, and deletion
