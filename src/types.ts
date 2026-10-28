@@ -1,5 +1,6 @@
 export type Tool =
   | 'select'
+  | 'object-select'
   | 'hand'
   | 'rectangle'
   | 'ellipse'
@@ -33,7 +34,14 @@ export interface GradientFill {
 }
 
 export type MaskType = 'none' | 'ellipse' | 'rounded' | 'star'
+export type MaskBrushMode = 'hide' | 'restore'
 export type ShapeKind = 'regular' | 'diamond' | 'arrow' | 'heart'
+
+export interface MaskBrushStroke {
+  points: Point[]
+  size: number
+  mode: MaskBrushMode
+}
 
 export interface DesignLayer {
   id: string
@@ -70,6 +78,10 @@ export interface DesignLayer {
   imageOffsetX?: number
   imageOffsetY?: number
   imageScale?: number
+  maskStrokes?: MaskBrushStroke[]
+  flipX?: boolean
+  flipY?: boolean
+  blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay'
 }
 
 export interface DesignDocument {

@@ -20,6 +20,7 @@ import {
   Crop,
   Diamond,
   Download,
+  Eraser,
   Eye,
   EyeOff,
   FileText,
@@ -27,7 +28,6 @@ import {
   Frame,
   Grid3X3,
   GripVertical,
-  Group,
   Hand,
   Heart,
   Hexagon,
@@ -41,7 +41,6 @@ import {
   Minus,
   Monitor,
   Moon,
-  MoreHorizontal,
   MousePointer2,
   Move,
   Palette,
@@ -51,6 +50,7 @@ import {
   Redo2,
   RotateCw,
   Ruler,
+  ScanSearch,
   Search,
   Settings2,
   Share2,
@@ -80,6 +80,7 @@ import {
   type ChangeEvent,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
@@ -92,6 +93,8 @@ import type {
   ExportFormat,
   GradientFill,
   LayerType,
+  MaskBrushMode,
+  MaskBrushStroke,
   MobileSheet,
   Point,
   Theme,
@@ -112,6 +115,7 @@ const DEFAULT_GRADIENT: GradientFill = {
 const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
+  maskStrokes: layer.maskStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
   gradient: layer.gradient ? { ...layer.gradient, stops: layer.gradient.stops.map((stop) => ({ ...stop })) } : undefined,
 }))
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -164,6 +168,9 @@ function App() {
     return stored ? null : 'objects-title'
   })
   const [activeTool, setActiveTool] = useState<Tool>('select')
+  const [editingTextId, setEditingTextId] = useState<string | null>(null)
+  const [maskBrushMode, setMaskBrushMode] = useState<MaskBrushMode>('hide')
+  const [maskBrushSize, setMaskBrushSize] = useState(72)
   const [artboards, setArtboards] = useState<ArtboardSnapshot[]>(() => {
     try {
       const stored = localStorage.getItem('pocketboard-artboards')
@@ -192,10 +199,23 @@ function App() {
   const clipboardRef = useRef<DesignLayer | null>(null)
   const toastTimerRef = useRef<number | null>(null)
   const layersRef = useRef(layers)
+  const textEditSnapshotRef = useRef<DesignLayer[] | null>(null)
 
   useEffect(() => {
     layersRef.current = layers
   }, [layers])
+
+  useEffect(() => {
+    if (editingTextId && (editingTextId !== selectedId || activeTool !== 'select' || !layers.some((layer) => layer.id === editingTextId))) {
+      const snapshot = textEditSnapshotRef.current
+      if (snapshot && JSON.stringify(snapshot) !== JSON.stringify(layersRef.current)) {
+        setPast((items) => [...items.slice(-99), snapshot])
+        setFuture([])
+      }
+      textEditSnapshotRef.current = null
+      setEditingTextId(null)
+    }
+  }, [activeTool, editingTextId, layers, selectedId])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -316,8 +336,10 @@ function App() {
   }
 
   const commitLayers = useCallback((nextLayers: DesignLayer[], message?: string) => {
-    setPast((items) => [...items.slice(-99), cloneLayers(layersRef.current)])
+    const snapshot = cloneLayers(layersRef.current)
+    setPast((items) => [...items.slice(-99), snapshot])
     setFuture([])
+    layersRef.current = nextLayers
     setLayers(nextLayers)
     if (message) showToast(message)
   }, [showToast])
@@ -326,23 +348,90 @@ function App() {
     const current = layersRef.current
     const next = current.map((layer) => layer.id === id ? { ...layer, ...patch } : layer)
     if (record) commitLayers(next)
-    else setLayers(next)
+    else {
+      layersRef.current = next
+      setLayers(next)
+    }
   }, [commitLayers])
+
+  const beginTextEditing = useCallback((id: string) => {
+    const layer = layersRef.current.find((item) => item.id === id)
+    if (!layer || layer.type !== 'text' || layer.locked) return
+    if (editingTextId !== id) textEditSnapshotRef.current = cloneLayers(layersRef.current)
+    setSelectedId(id)
+    setActiveTool('select')
+    setMobileSheet(null)
+    setEditingTextId(id)
+  }, [editingTextId])
+
+  const updateTextEditing = useCallback((id: string, patch: Partial<DesignLayer>) => {
+    updateLayer(id, patch, false)
+  }, [updateLayer])
+
+  const finishTextEditing = useCallback(() => {
+    const snapshot = textEditSnapshotRef.current
+    if (snapshot) {
+      const changed = JSON.stringify(snapshot) !== JSON.stringify(layersRef.current)
+      if (changed) {
+        setPast((items) => [...items.slice(-99), snapshot])
+        setFuture([])
+      }
+    }
+    textEditSnapshotRef.current = null
+    setEditingTextId(null)
+  }, [])
+
+  const addMaskStroke = useCallback((id: string, stroke: MaskBrushStroke) => {
+    const current = layersRef.current
+    const target = current.find((layer) => layer.id === id)
+    if (!target || target.locked) return
+    commitLayers(current.map((layer) => layer.id === id
+      ? { ...layer, maskStrokes: [...(layer.maskStrokes || []), stroke] }
+      : layer))
+  }, [commitLayers])
+
+  const clearPaintMask = useCallback((id: string) => {
+    const current = layersRef.current
+    const target = current.find((layer) => layer.id === id)
+    if (!target?.maskStrokes?.length) return
+    commitLayers(current.map((layer) => layer.id === id ? { ...layer, maskStrokes: [] } : layer), 'Mask cleared')
+  }, [commitLayers])
+
+  const activateMaskBrush = useCallback(() => {
+    const target = layersRef.current.find((layer) => layer.id === selectedId)
+    if (!target) {
+      setActiveTool('object-select')
+      showToast('Select an object to mask.')
+      return
+    }
+    if (target.locked) {
+      showToast('Unlock the object before masking.')
+      return
+    }
+    finishTextEditing()
+    setMaskBrushMode('hide')
+    setActiveTool('brush')
+    setMobileSheet(null)
+  }, [finishTextEditing, selectedId, showToast])
 
   const undo = useCallback(() => {
     if (!past.length) return
-    const previous = past[past.length - 1]
-    setFuture((items) => [cloneLayers(layersRef.current), ...items].slice(0, 100))
+    const previous = cloneLayers(past[past.length - 1])
+    const current = cloneLayers(layersRef.current)
+    setFuture((items) => [current, ...items].slice(0, 100))
     setPast((items) => items.slice(0, -1))
-    setLayers(cloneLayers(previous))
+    layersRef.current = previous
+    setLayers(previous)
   }, [past])
 
   const redo = useCallback(() => {
     if (!future.length) return
-    const next = future[0]
-    setPast((items) => [...items.slice(-99), cloneLayers(layersRef.current)])
+    const next = cloneLayers(future[0])
+    const current = cloneLayers(layersRef.current)
+    setPast((items) => [...items.slice(-99), current])
     setFuture((items) => items.slice(1))
-    setLayers(cloneLayers(next))
+    layersRef.current = next
+    setLayers(next)
   }, [future])
 
   const deleteSelected = useCallback(() => {
@@ -351,6 +440,7 @@ function App() {
     if (!layer || layer.locked) return
     commitLayers(layersRef.current.filter((item) => item.id !== selectedId), 'Layer deleted')
     setSelectedId(null)
+    setEditingTextId(null)
   }, [commitLayers, selectedId])
 
   const duplicateSelected = useCallback(() => {
@@ -457,6 +547,7 @@ function App() {
     setSelectedId(base.id)
     setActiveTool('select')
     if (isCompact) setMobileSheet(null)
+    return base.id
   }, [commitLayers, documentMeta.height, documentMeta.width, isCompact])
 
   const addDrawnPath = useCallback((rawPoints: Point[], type: 'path' | 'brush', closed = false) => {
@@ -559,17 +650,18 @@ function App() {
         if (event.key === 'ArrowDown') patch.y = layer.y + step
         updateLayer(selectedId, patch)
       } else if (event.key.toLowerCase() === 'v') setActiveTool('select')
+      else if (event.key.toLowerCase() === 'q') setActiveTool('object-select')
       else if (event.key.toLowerCase() === 'h') setActiveTool('hand')
       else if (event.key.toLowerCase() === 'r') setActiveTool('rectangle')
       else if (event.key.toLowerCase() === 't') setActiveTool('text')
       else if (event.key.toLowerCase() === 'p') setActiveTool('pen')
-      else if (event.key.toLowerCase() === 'b') setActiveTool('brush')
+      else if (event.key.toLowerCase() === 'b') activateMaskBrush()
       else if (event.key.toLowerCase() === 'z') setActiveTool('zoom')
       else if (event.key.toLowerCase() === 'u') setActiveTool('polygon')
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, commitLayers, deleteSelected, duplicateSelected, redo, selectedId, undo, updateLayer])
+  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, redo, selectedId, undo, updateLayer])
 
   const createDesign = (meta: DesignDocument, name: string) => {
     const toPx = (value: number) => {
@@ -676,6 +768,34 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
+  const handleMobileToolAction = (action: MobileToolAction) => {
+    if (action === 'select' || action === 'mask-done') {
+      finishTextEditing()
+      setActiveTool('select')
+    } else if (action === 'object-select') {
+      finishTextEditing()
+      setActiveTool('object-select')
+    } else if (action === 'mask-brush') activateMaskBrush()
+    else if (action === 'shapes') setMobileSheet('shapes')
+    else if (action === 'text') { setSelectedId(null); setActiveTool('text') }
+    else if (action === 'image') imageInputRef.current?.click()
+    else if (action === 'layers') setMobileSheet('layers')
+    else if (action === 'more') setMobileSheet('more')
+    else if (action === 'properties' || action === 'align' || action === 'arrange') setMobileSheet('properties')
+    else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
+    else if (action === 'corners') setActiveTool('corner')
+    else if (action === 'duplicate') duplicateSelected()
+    else if (action === 'delete') deleteSelected()
+    else if (action === 'crop' && selected?.type === 'image') {
+      if ((selected.imageScale || 1) <= 1) updateLayer(selected.id, { imageScale: 1.15 })
+      setActiveTool('crop')
+    } else if (action === 'shape-mask' && selected?.type === 'image') setMobileSheet('mask')
+    else if (action === 'mask-hide') setMaskBrushMode('hide')
+    else if (action === 'mask-restore') setMaskBrushMode('restore')
+    else if (action === 'mask-smaller') setMaskBrushSize((size) => clamp(round(size * .75), 8, 320))
+    else if (action === 'mask-larger') setMaskBrushSize((size) => clamp(round(size * 1.3), 8, 320))
+    else if (action === 'mask-clear' && selected) clearPaintMask(selected.id)
+  }
   const syncedArtboards = artboards.map((artboard) => artboard.id === activeArtboardId ? { ...artboard, document: documentMeta, layers } : artboard)
   const exportArtboards = [...syncedArtboards.filter((artboard) => artboard.id === activeArtboardId), ...syncedArtboards.filter((artboard) => artboard.id !== activeArtboardId)]
 
@@ -704,7 +824,11 @@ function App() {
           activeTool={activeTool}
           onTool={(tool) => {
             if (tool === 'image') imageInputRef.current?.click()
-            else setActiveTool(tool)
+            else if (tool === 'brush') activateMaskBrush()
+            else {
+              finishTextEditing()
+              setActiveTool(tool)
+            }
           }}
           onGrid={() => {
             setGridVisible((visible) => !visible)
@@ -752,9 +876,20 @@ function App() {
             gridSize={gridSize}
             guidesVisible={guidesVisible}
             userGuides={canvasGuides}
-            onSelect={setSelectedId}
+            editingTextId={editingTextId}
+            maskBrushMode={maskBrushMode}
+            maskBrushSize={maskBrushSize}
+            onSelect={(id) => {
+              if (id !== editingTextId) finishTextEditing()
+              setSelectedId(id)
+              if (id === null && ['object-select', 'corner', 'crop', 'brush'].includes(activeTool)) setActiveTool('select')
+            }}
             onAddLayer={addLayer}
             onAddPath={addDrawnPath}
+            onAddMaskStroke={addMaskStroke}
+            onBeginTextEdit={beginTextEditing}
+            onCommitText={updateTextEditing}
+            onFinishTextEdit={finishTextEditing}
             onOpenArtboards={openArtboardManager}
             onZoom={(delta) => setZoom((value) => clamp(value + delta, 5, 6400))}
             onSetZoom={(value) => setZoom(clamp(value, 5, 6400))}
@@ -771,12 +906,17 @@ function App() {
             <ContextBar
               selected={selected}
               activeTool={activeTool}
+              maskBrushMode={maskBrushMode}
+              maskBrushSize={maskBrushSize}
               onOpenProperties={() => setMobileSheet('properties')}
               onOpenMask={() => setMobileSheet('mask')}
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
               onDoneTool={() => setActiveTool('select')}
               onUpdate={(patch) => updateLayer(selected.id, patch)}
+              onMaskMode={setMaskBrushMode}
+              onMaskSize={(size) => setMaskBrushSize(clamp(size, 8, 320))}
+              onClearMask={() => clearPaintMask(selected.id)}
             />
           )}
 
@@ -822,12 +962,8 @@ function App() {
       <MobileToolbar
         activeTool={activeTool}
         selected={selected}
-        onSelect={() => setActiveTool('select')}
-        onShapes={() => setMobileSheet('shapes')}
-        onText={() => setActiveTool('text')}
-        onImage={() => imageInputRef.current?.click()}
-        onLayers={() => setMobileSheet('layers')}
-        onMore={() => setMobileSheet('more')}
+        maskBrushMode={maskBrushMode}
+        onAction={handleMobileToolAction}
       />
 
       {mobileSheet && (
@@ -898,6 +1034,8 @@ function App() {
                 setActiveTool('crop')
                 setMobileSheet(null)
               }}
+              onBrushMask={activateMaskBrush}
+              onClearPaintMask={() => clearPaintMask(selected.id)}
             />
           )}
           {mobileSheet === 'more' && (
@@ -908,7 +1046,9 @@ function App() {
                 else if (action === 'grid') setGridVisible((visible) => !visible)
                 else if (action === 'rulers') toggleGuides()
                 else if (action === 'artboards') { openArtboardManager(); return }
-                else if (action === 'pen' || action === 'brush' || action === 'zoom' || action === 'corner') setActiveTool(action)
+                else if (action === 'settings') { setMobileSheet('properties'); return }
+                else if (action === 'brush') { activateMaskBrush(); return }
+                else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner') setActiveTool(action)
                 setMobileSheet(null)
               }}
             />
@@ -995,7 +1135,6 @@ function TopBar(props: TopBarProps) {
         </IconButton>
         <button className="button secondary share-button" onClick={props.onShare}><Share2 size={17} /><span>Share</span></button>
         <button className="button primary export-button" onClick={props.onExport}><Download size={17} /><span>Export</span></button>
-        <IconButton className="mobile-more" label="More options"><MoreHorizontal /></IconButton>
       </div>
     </header>
   )
@@ -1034,6 +1173,7 @@ function IconButton({ label, shortcut, onClick, disabled, active, className = ''
 function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { activeTool: Tool; onTool: (tool: Tool) => void; onGrid: () => void; onGuides: () => void; onAddArtboard: () => void }) {
   const tools: { id: Tool; label: string; shortcut?: string; icon: ReactNode; divider?: boolean }[] = [
     { id: 'select', label: 'Select', shortcut: 'V', icon: <MousePointer2 /> },
+    { id: 'object-select', label: 'Object selection', shortcut: 'Q', icon: <ScanSearch /> },
     { id: 'hand', label: 'Hand tool', shortcut: 'H', icon: <Hand /> },
     { id: 'rectangle', label: 'Rectangle', shortcut: 'R', icon: <Square />, divider: true },
     { id: 'ellipse', label: 'Ellipse', shortcut: 'O', icon: <Circle /> },
@@ -1041,7 +1181,7 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'star', label: 'Star', icon: <Star /> },
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
-    { id: 'brush', label: 'Brush tool', shortcut: 'B', icon: <Brush /> },
+    { id: 'brush', label: 'Mask brush', shortcut: 'B', icon: <Brush /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'text', label: 'Text', shortcut: 'T', icon: <Type />, divider: true },
     { id: 'image', label: 'Place image', icon: <ImageIcon /> },
@@ -1233,7 +1373,6 @@ function LayersPanel(props: LayersPanelProps) {
       </div>
       <span className="visually-hidden" role="status" aria-live="polite">{reorderAnnouncement}</span>
       <div className="panel-footer-actions">
-        <IconButton label="Group selection"><Group /></IconButton>
         <IconButton label="Duplicate" shortcut="Ctrl D" onClick={props.onDuplicate} disabled={!props.selectedId}><Copy /></IconButton>
         <IconButton label="Move layer up" onClick={props.onMoveUp} disabled={!props.selectedId}><ArrowUp /></IconButton>
         <IconButton label="Move layer down" onClick={props.onMoveDown} disabled={!props.selectedId}><ArrowDown /></IconButton>
@@ -1267,9 +1406,16 @@ interface CanvasProps {
   gridSize: number
   guidesVisible: boolean
   userGuides: CanvasGuide[]
+  editingTextId: string | null
+  maskBrushMode: MaskBrushMode
+  maskBrushSize: number
   onSelect: (id: string | null) => void
-  onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => void
+  onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => string
   onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
+  onAddMaskStroke: (id: string, stroke: MaskBrushStroke) => void
+  onBeginTextEdit: (id: string) => void
+  onCommitText: (id: string, patch: Partial<DesignLayer>) => void
+  onFinishTextEdit: () => void
   onOpenArtboards: () => void
   onZoom: (delta: number) => void
   onSetZoom: (zoom: number) => void
@@ -1314,6 +1460,7 @@ function Canvas(props: CanvasProps) {
   const onAddPath = props.onAddPath
   const transformRef = useRef<TransformState | null>(null)
   const transformCleanupRef = useRef<(() => void) | null>(null)
+  const maskStrokeCleanupRef = useRef<(() => void) | null>(null)
   const layersRef = useRef(props.layers)
   const scrollRef = useRef<HTMLDivElement>(null)
   const touchPointersRef = useRef(new Map<number, Point>())
@@ -1341,6 +1488,7 @@ function Canvas(props: CanvasProps) {
   }, [])
   useEffect(() => () => {
     transformCleanupRef.current?.()
+    maskStrokeCleanupRef.current?.()
     cancelLongPressRef.current?.()
   }, [])
   useLayoutEffect(() => {
@@ -1449,6 +1597,7 @@ function Canvas(props: CanvasProps) {
     if (!svg) return
 
     transformCleanupRef.current?.()
+    maskStrokeCleanupRef.current?.()
     cancelLongPressRef.current?.()
     setSmartGuides({})
     const rect = svg.getBoundingClientRect()
@@ -1489,6 +1638,11 @@ function Canvas(props: CanvasProps) {
     }
     props.onSetZoom(nextZoom)
     event.preventDefault()
+  }
+
+  const onCanvasSurfacePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return
+    props.onSelect(null)
   }
 
   const finishCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1608,9 +1762,11 @@ function Canvas(props: CanvasProps) {
       if (finished) return
       finished = true
       const state = transformRef.current
+      let textToEdit: string | null = null
       if (state?.pointerId === pointerId) {
         if (state.moved && commit) props.onCommitSnapshot(state.snapshot)
         else if (state.moved) props.onUpdateLive(state.id, state.original)
+        else if (commit && state.mode === 'move' && state.original.type === 'text') textToEdit = state.id
         transformRef.current = null
       }
       setSmartGuides({})
@@ -1621,6 +1777,7 @@ function Canvas(props: CanvasProps) {
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
       if (transformCleanupRef.current === cancelTransform) transformCleanupRef.current = null
+      if (textToEdit) props.onBeginTextEdit(textToEdit)
     }
     function onUp(upEvent: PointerEvent) {
       if (upEvent.pointerId === pointerId) finish(true)
@@ -1635,28 +1792,70 @@ function Canvas(props: CanvasProps) {
     window.addEventListener('pointercancel', onCancel)
   }
 
-  const startBrushStroke = (event: ReactPointerEvent<SVGSVGElement>) => {
+  const startMaskStroke = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const layer = props.selected
+    if (!layer || layer.locked || pinchRef.current) return
     event.preventDefault()
-    const start = pointerToCanvas(event.clientX, event.clientY)
-    const points = [start]
+    maskStrokeCleanupRef.current?.()
+    const pointerId = event.pointerId
+    const captureTarget = event.currentTarget
+    try { captureTarget.setPointerCapture(pointerId) } catch { /* window listeners remain as a fallback */ }
+    const points = [pointerToCanvas(event.clientX, event.clientY)]
     setDraftPoints(points)
+
     const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId || pinchRef.current) return
+      moveEvent.preventDefault()
       const point = pointerToCanvas(moveEvent.clientX, moveEvent.clientY)
       const previous = points[points.length - 1]
       if (Math.hypot(point.x - previous.x, point.y - previous.y) < 2) return
       points.push(point)
       setDraftPoints([...points])
     }
-    const onUp = () => {
-      if (points.length > 1) props.onAddPath(points, 'brush', false)
+    let finished = false
+    const finish = (commit: boolean) => {
+      if (finished) return
+      finished = true
+      if (commit && points.length > 1) {
+        const angle = -layer.rotation * Math.PI / 180
+        const cos = Math.cos(angle)
+        const sin = Math.sin(angle)
+        const cx = layer.x + layer.width / 2
+        const cy = layer.y + layer.height / 2
+        const normalized = points.map((point) => {
+          const dx = point.x - cx
+          const dy = point.y - cy
+          const rotatedX = cx + dx * cos - dy * sin
+          const rotatedY = cy + dx * sin + dy * cos
+          const localX = layer.flipX ? cx * 2 - rotatedX : rotatedX
+          const localY = layer.flipY ? cy * 2 - rotatedY : rotatedY
+          return {
+            x: (localX - layer.x) / Math.max(1, layer.width),
+            y: (localY - layer.y) / Math.max(1, layer.height),
+          }
+        })
+        props.onAddMaskStroke(layer.id, {
+          points: normalized,
+          size: props.maskBrushSize / Math.max(1, Math.max(layer.width, layer.height)),
+          mode: props.maskBrushMode,
+        })
+      }
       setDraftPoints([])
+      try {
+        if (captureTarget.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId)
+      } catch { /* the pointer may already be released */ }
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
-      window.removeEventListener('pointercancel', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      maskStrokeCleanupRef.current = null
     }
-    window.addEventListener('pointermove', onMove)
+    const onUp = (upEvent: PointerEvent) => { if (upEvent.pointerId === pointerId) finish(true) }
+    const onCancel = (cancelEvent: PointerEvent) => { if (cancelEvent.pointerId === pointerId) finish(false) }
+    const onCancelStroke = () => finish(false)
+    maskStrokeCleanupRef.current = onCancelStroke
+    window.addEventListener('pointermove', onMove, { passive: false })
     window.addEventListener('pointerup', onUp)
-    window.addEventListener('pointercancel', onUp)
+    window.addEventListener('pointercancel', onCancel)
   }
 
   const startGuideDrag = (event: ReactPointerEvent, guide: CanvasGuide) => {
@@ -1742,12 +1941,23 @@ function Canvas(props: CanvasProps) {
 
   const onLayerPointerDown = (event: ReactPointerEvent<SVGGElement>, layer: DesignLayer) => {
     if (props.activeTool === 'select') startTransform(event, layer, 'move')
-    else if (props.activeTool === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))) {
+    else if (props.activeTool === 'object-select') {
+      event.stopPropagation()
+      event.preventDefault()
+      props.onSelect(layer.id)
+    } else if (props.activeTool === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))) {
       event.stopPropagation()
       props.onSelect(layer.id)
     } else if (props.activeTool === 'crop' && layer.type === 'image') {
       startTransform(event, layer, 'crop')
     }
+  }
+
+  const onLayerDoubleClick = (event: ReactMouseEvent<SVGGElement>, layer: DesignLayer) => {
+    if (layer.type !== 'text' || layer.locked) return
+    event.stopPropagation()
+    event.preventDefault()
+    props.onBeginTextEdit(layer.id)
   }
 
   const onBackgroundPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -1756,7 +1966,7 @@ function Canvas(props: CanvasProps) {
       return
     }
     if (props.activeTool === 'brush') {
-      startBrushStroke(event)
+      startMaskStroke(event)
       return
     }
     if (props.activeTool === 'zoom') {
@@ -1782,14 +1992,33 @@ function Canvas(props: CanvasProps) {
       }
       return
     }
-    if (['rectangle', 'ellipse', 'polygon', 'text', 'star', 'line'].includes(props.activeTool)) {
+    if (props.activeTool === 'text') {
+      const point = pointerToCanvas(event.clientX, event.clientY)
+      const id = props.onAddLayer('text', point)
+      const pointerId = event.pointerId
+      const beginOnRelease = (upEvent: PointerEvent) => {
+        if (upEvent.pointerId !== pointerId) return
+        window.removeEventListener('pointerup', beginOnRelease)
+        window.removeEventListener('pointercancel', cancelOnRelease)
+        props.onBeginTextEdit(id)
+      }
+      const cancelOnRelease = (cancelEvent: PointerEvent) => {
+        if (cancelEvent.pointerId !== pointerId) return
+        window.removeEventListener('pointerup', beginOnRelease)
+        window.removeEventListener('pointercancel', cancelOnRelease)
+      }
+      window.addEventListener('pointerup', beginOnRelease)
+      window.addEventListener('pointercancel', cancelOnRelease)
+      return
+    }
+    if (['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(props.activeTool)) {
       const point = pointerToCanvas(event.clientX, event.clientY)
       props.onAddLayer(props.activeTool as LayerType, point)
       return
     }
     const target = event.target as SVGElement
     if (target.dataset.layer) return
-    if (props.activeTool === 'select') props.onSelect(null)
+    if (props.activeTool === 'select' || props.activeTool === 'object-select' || props.activeTool === 'corner' || props.activeTool === 'crop') props.onSelect(null)
   }
 
   const aspect = props.documentMeta.width / props.documentMeta.height
@@ -1806,6 +2035,7 @@ function Canvas(props: CanvasProps) {
       ref={scrollRef}
       className={`canvas-scroll ${isPinching ? 'is-pinching' : ''}`}
       onPointerDownCapture={onCanvasPointerDownCapture}
+      onPointerDown={onCanvasSurfacePointerDown}
       onPointerMoveCapture={onCanvasPointerMoveCapture}
       onPointerUpCapture={finishCanvasPointer}
       onPointerCancelCapture={finishCanvasPointer}
@@ -1830,7 +2060,13 @@ function Canvas(props: CanvasProps) {
             {props.layers.map((layer) => <LayerDefinition key={layer.id} layer={layer} />)}
           </defs>
           {props.layers.filter((layer) => layer.visible).map((layer) => (
-            <LayerElement key={layer.id} layer={layer} onPointerDown={(event) => onLayerPointerDown(event, layer)} />
+            <LayerElement
+              key={layer.id}
+              layer={layer}
+              editing={props.editingTextId === layer.id}
+              onPointerDown={(event) => onLayerPointerDown(event, layer)}
+              onDoubleClick={(event) => onLayerDoubleClick(event, layer)}
+            />
           ))}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
@@ -1838,9 +2074,9 @@ function Canvas(props: CanvasProps) {
             : <line key={guide.id} className="user-guide guide-y" y1={guide.position} y2={guide.position} x1="0" x2={props.documentMeta.width} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />)}
           {smartGuides.x !== undefined && <line className="smart-guide" x1={smartGuides.x} x2={smartGuides.x} y1="0" y2={props.documentMeta.height} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {smartGuides.y !== undefined && <line className="smart-guide" y1={smartGuides.y} y2={smartGuides.y} x1="0" x2={props.documentMeta.width} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
-          {draftPoints.length > 0 && props.activeTool === 'brush' && <path d={smoothPath(draftPoints, .55)} fill="none" stroke="#18181B" strokeWidth="16" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" />}
+          {draftPoints.length > 0 && props.activeTool === 'brush' && <path className="mask-brush-preview" d={smoothPath(draftPoints, .55)} fill="none" stroke={props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} strokeWidth={props.maskBrushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".58" pointerEvents="none" />}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
-          {props.selected?.visible && (
+          {props.selected?.visible && props.editingTextId !== props.selected.id && (
             <SelectionOverlay
               layer={props.selected}
               mode={props.activeTool}
@@ -1851,9 +2087,18 @@ function Canvas(props: CanvasProps) {
               onCrop={(event) => startTransform(event, props.selected!, 'crop')}
             />
           )}
+          {props.editingTextId && props.selected?.id === props.editingTextId && props.selected.type === 'text' && (
+            <TextEditorOverlay
+              key={props.selected.id}
+              layer={props.selected}
+              onUpdate={(patch) => props.onCommitText(props.selected!.id, patch)}
+              onFinish={props.onFinishTextEdit}
+            />
+          )}
         </svg>
         {props.activeTool === 'pen' && <div className="canvas-tool-tip"><PenTool size={14} /> Click to add points · click the first point to close · Enter to finish</div>}
-        {props.activeTool === 'brush' && <div className="canvas-tool-tip"><Brush size={14} /> Drag on the artboard to paint</div>}
+        {props.activeTool === 'object-select' && <div className="canvas-tool-tip"><ScanSearch size={14} /> Tap an object to select it for masking</div>}
+        {props.activeTool === 'brush' && <div className="canvas-tool-tip"><Brush size={14} /> {props.maskBrushMode === 'hide' ? 'Brush to hide parts of the selected object' : 'Brush to restore hidden parts'}</div>}
         {props.activeTool === 'zoom' && <div className="canvas-tool-tip"><ZoomIn size={14} /> Click to zoom in · Alt-click to zoom out</div>}
       </div>
       </div>
@@ -1877,6 +2122,14 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
             ? <polygon points={starPoints(layer.x + layer.width / 2, layer.y + layer.height / 2, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} />
             : <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={mask === 'rounded' ? Math.min(layer.width, layer.height) * .16 : layer.radius || 0} />}
       </clipPath>}
+      {Boolean(layer.maskStrokes?.length) && (
+        <mask id={`paint-mask-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3}>
+          <rect x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3} fill="white" />
+          {layer.maskStrokes!.map((stroke, index) => (
+            <path key={index} d={smoothPath(maskStrokePoints(layer, stroke), .55)} fill="none" stroke={stroke.mode === 'hide' ? 'black' : 'white'} strokeWidth={maskStrokeWidth(layer, stroke)} strokeLinecap="round" strokeLinejoin="round" />
+          ))}
+        </mask>
+      )}
     </>
   )
 }
@@ -1885,11 +2138,33 @@ function layerFill(layer: DesignLayer) {
   return layer.fillType && layer.fillType !== 'solid' && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
 }
 
-function LayerElement({ layer, onPointerDown }: { layer: DesignLayer; onPointerDown: (event: ReactPointerEvent<SVGGElement>) => void }) {
+function maskStrokePoints(layer: DesignLayer, stroke: MaskBrushStroke) {
+  return stroke.points.map((point) => ({ x: layer.x + point.x * layer.width, y: layer.y + point.y * Math.max(1, layer.height) }))
+}
+
+function maskStrokeWidth(layer: DesignLayer, stroke: MaskBrushStroke) {
+  return stroke.size * Math.max(1, Math.max(layer.width, layer.height))
+}
+
+function layerTransform(layer: DesignLayer) {
   const cx = layer.x + layer.width / 2
   const cy = layer.y + layer.height / 2
-  const transform = `rotate(${layer.rotation} ${cx} ${cy})`
-  const common = { opacity: layer.opacity, 'data-layer': layer.id }
+  const flip = layer.flipX || layer.flipY
+    ? ` translate(${cx} ${cy}) scale(${layer.flipX ? -1 : 1} ${layer.flipY ? -1 : 1}) translate(${-cx} ${-cy})`
+    : ''
+  return `rotate(${layer.rotation} ${cx} ${cy})${flip}`
+}
+
+function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
+  layer: DesignLayer
+  editing?: boolean
+  onPointerDown: (event: ReactPointerEvent<SVGGElement>) => void
+  onDoubleClick: (event: ReactMouseEvent<SVGGElement>) => void
+}) {
+  const cx = layer.x + layer.width / 2
+  const cy = layer.y + layer.height / 2
+  const transform = layerTransform(layer)
+  const common = { opacity: editing ? 0 : layer.opacity, 'data-layer': layer.id }
   const fill = layerFill(layer)
   let content: ReactNode
   if (layer.type === 'rectangle') {
@@ -1923,7 +2198,70 @@ function LayerElement({ layer, onPointerDown }: { layer: DesignLayer; onPointerD
       </text>
     )
   }
-  return <g transform={transform} onPointerDown={onPointerDown} data-layer={layer.id} style={{ cursor: layer.locked ? 'not-allowed' : undefined }}>{content}</g>
+  return <g
+    transform={transform}
+    mask={layer.maskStrokes?.length ? `url(#paint-mask-${layer.id})` : undefined}
+    onPointerDown={onPointerDown}
+    onDoubleClick={onDoubleClick}
+    data-layer={layer.id}
+    style={{ cursor: layer.locked ? 'not-allowed' : undefined, mixBlendMode: layer.blendMode || 'normal' }}
+  >{content}</g>
+}
+
+function TextEditorOverlay({ layer, onUpdate, onFinish }: {
+  layer: DesignLayer
+  onUpdate: (patch: Partial<DesignLayer>) => void
+  onFinish: () => void
+}) {
+  const [value, setValue] = useState(layer.text || '')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.focus({ preventScroll: true })
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+  }, [])
+
+  const fontSize = layer.fontSize || 32
+  const transform = layerTransform(layer)
+  const updateValue = (text: string) => {
+    setValue(text)
+    const lines = Math.max(1, text.split('\n').length)
+    const height = Math.max(layer.height, lines * fontSize * (layer.lineHeight || 1.2))
+    onUpdate({ text, height })
+  }
+  return (
+    <foreignObject className="text-editor-overlay" x={layer.x} y={layer.y} width={Math.max(layer.width, 40)} height={Math.max(layer.height, fontSize * 1.2)} transform={transform}>
+      <div className="text-editor-surface">
+        <textarea
+          ref={textareaRef}
+          value={value}
+          aria-label={`Edit ${layer.name}`}
+          style={{
+            color: layer.fill,
+            fontFamily: layer.fontFamily || 'Inter',
+            fontSize: `${fontSize}px`,
+            fontWeight: layer.fontWeight || 400,
+            letterSpacing: `${layer.letterSpacing || 0}px`,
+            lineHeight: layer.lineHeight || 1.2,
+            textAlign: layer.textAlign || 'left',
+          }}
+          onChange={(event) => updateValue(event.target.value)}
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onBlur={onFinish}
+          onKeyDown={(event) => {
+            event.stopPropagation()
+            if (event.key === 'Escape' || (event.key === 'Enter' && (event.metaKey || event.ctrlKey))) {
+              event.preventDefault()
+              onFinish()
+            }
+          }}
+        />
+      </div>
+    </foreignObject>
+  )
 }
 
 function layerPoints(layer: DesignLayer): Point[] {
@@ -2165,17 +2503,33 @@ function ZoomControl({ zoom, onZoomOut, onZoomIn, onFit }: { zoom: number; onZoo
   )
 }
 
-function ContextBar({ selected, activeTool, onOpenProperties, onOpenMask, onDuplicate, onDelete, onDoneTool, onUpdate }: {
+function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpenProperties, onOpenMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
   selected: DesignLayer
   activeTool: Tool
+  maskBrushMode: MaskBrushMode
+  maskBrushSize: number
   onOpenProperties: () => void
   onOpenMask: () => void
   onDuplicate: () => void
   onDelete: () => void
   onDoneTool: () => void
   onUpdate: (patch: Partial<DesignLayer>) => void
+  onMaskMode: (mode: MaskBrushMode) => void
+  onMaskSize: (size: number) => void
+  onClearMask: () => void
 }) {
-  const focusedMode = activeTool === 'crop' || activeTool === 'corner'
+  const focusedMode = activeTool === 'crop' || activeTool === 'corner' || activeTool === 'brush'
+  if (activeTool === 'brush') {
+    return (
+      <div className="context-bar focused mask-brush-bar" aria-label="Mask brush controls">
+        <button className="context-item context-done" onClick={onDoneTool}><Check size={17} /><span>Done</span></button>
+        <button className={`context-item ${maskBrushMode === 'hide' ? 'active' : ''}`} onClick={() => onMaskMode('hide')}><Brush size={17} /><span>Hide</span></button>
+        <button className={`context-item ${maskBrushMode === 'restore' ? 'active' : ''}`} onClick={() => onMaskMode('restore')}><Eraser size={17} /><span>Restore</span></button>
+        <label className="mask-size-control"><span>Size</span><input type="range" min="8" max="320" value={maskBrushSize} onChange={(event) => onMaskSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label>
+        <button className="context-item danger" disabled={!selected.maskStrokes?.length} onClick={onClearMask}><Trash2 size={17} /><span>Clear</span></button>
+      </div>
+    )
+  }
   return (
     <div className={`context-bar ${focusedMode ? 'focused' : ''}`} aria-label="Selection actions">
       {focusedMode && <button className="context-item context-done" onClick={onDoneTool}><Check size={17} /><span>Done</span></button>}
@@ -2225,7 +2579,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
   if (!props.selected) {
     return (
       <div className={`panel-inner properties-inner ${props.insideSheet ? 'inside-sheet' : ''}`}>
-        {!props.insideSheet && <div className="panel-header properties-title"><div><h2>Design</h2></div><IconButton label="Design options"><MoreHorizontal /></IconButton></div>}
+        {!props.insideSheet && <div className="panel-header properties-title"><div><h2>Design</h2></div></div>}
         <PropertySection title="Artboard">
           <div className="dimension-pair">
             <NumberInput label="W" value={props.documentMeta.width} unit="px" onChange={(value) => props.onUpdateDocument({ width: value })} />
@@ -2254,7 +2608,6 @@ function PropertiesPanel(props: PropertiesPanelProps) {
       {!props.insideSheet && (
         <div className="panel-header properties-title">
           <div className="property-heading-icon"><LayerThumbnail layer={layer} /><div><h2>{layer.type === 'text' ? 'Text' : layer.type === 'image' ? 'Image' : layer.type === 'brush' ? 'Brush' : layer.type === 'path' ? 'Path' : 'Shape'}</h2><span>{layer.name}</span></div></div>
-          <IconButton label="More layer options"><MoreHorizontal /></IconButton>
         </div>
       )}
       <div className="quick-arrange">
@@ -2293,7 +2646,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         </div>
         <div className="single-property-row">
           <NumberInput label={<RotateCw size={14} />} value={round(layer.rotation)} unit="°" onChange={(value) => props.onUpdate({ rotation: value })} />
-          <div className="flip-actions"><button aria-label="Flip horizontally">↔</button><button aria-label="Flip vertically">↕</button></div>
+          <div className="flip-actions"><button className={layer.flipX ? 'active' : ''} onClick={() => props.onUpdate({ flipX: !layer.flipX })} aria-label="Flip horizontally" aria-pressed={Boolean(layer.flipX)}>↔</button><button className={layer.flipY ? 'active' : ''} onClick={() => props.onUpdate({ flipY: !layer.flipY })} aria-label="Flip vertically" aria-pressed={Boolean(layer.flipY)}>↕</button></div>
         </div>
       </PropertySection>
 
@@ -2374,7 +2727,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       <PropertySection title="Appearance">
         <SliderField label="Opacity" value={round(layer.opacity * 100)} min={0} max={100} unit="%" onChange={(value) => props.onUpdate({ opacity: value / 100 })} />
-        <SelectField label="Blend" value="Normal" options={['Normal', 'Multiply', 'Screen', 'Overlay']} onChange={() => undefined} />
+        <SelectField label="Blend" value={(layer.blendMode || 'normal')[0].toUpperCase() + (layer.blendMode || 'normal').slice(1)} options={['Normal', 'Multiply', 'Screen', 'Overlay']} onChange={(value) => props.onUpdate({ blendMode: value.toLowerCase() as DesignLayer['blendMode'] })} />
       </PropertySection>
       {props.insideSheet && <button className="button destructive-text full-button" onClick={props.onDelete}><Trash2 size={17} /> Delete layer</button>}
     </div>
@@ -2488,20 +2841,80 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
   return <button className={`setting-row ${active ? 'active' : ''}`} onClick={onClick}><span>{icon}{label}</span><span>{value}<ChevronRight size={14} /></span></button>
 }
 
-function MobileToolbar({ activeTool, selected, onSelect, onShapes, onText, onImage, onLayers, onMore }: {
-  activeTool: Tool; selected: DesignLayer | null; onSelect: () => void; onShapes: () => void; onText: () => void; onImage: () => void; onLayers: () => void; onMore: () => void
+type MobileToolAction =
+  | 'select' | 'object-select' | 'mask-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
+  | 'properties' | 'edit-text' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
+  | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
+
+function MobileToolbar({ activeTool, selected, maskBrushMode, onAction }: {
+  activeTool: Tool
+  selected: DesignLayer | null
+  maskBrushMode: MaskBrushMode
+  onAction: (action: MobileToolAction) => void
 }) {
-  const items = [
-    { label: 'Select', icon: <MousePointer2 />, onClick: onSelect, active: activeTool === 'select' },
-    { label: 'Shapes', icon: <Shapes />, onClick: onShapes, active: ['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(activeTool) },
-    { label: 'Text', icon: <Type />, onClick: onText, active: activeTool === 'text' },
-    { label: 'Image', icon: <ImageIcon />, onClick: onImage, active: activeTool === 'image' },
-    { label: 'Layers', icon: <Layers3 />, onClick: onLayers, active: Boolean(selected) },
-    { label: 'More', icon: <Menu />, onClick: onMore, active: ['pen', 'brush', 'corner', 'zoom', 'crop'].includes(activeTool) },
-  ]
+  type Item = { label: string; icon: ReactNode; action: MobileToolAction; active?: boolean; danger?: boolean; disabled?: boolean }
+  let items: Item[]
+
+  if (activeTool === 'brush' && selected) {
+    items = [
+      { label: 'Done', icon: <Check />, action: 'mask-done', active: true },
+      { label: 'Hide', icon: <Brush />, action: 'mask-hide', active: maskBrushMode === 'hide' },
+      { label: 'Restore', icon: <Eraser />, action: 'mask-restore', active: maskBrushMode === 'restore' },
+      { label: 'Smaller', icon: <Minus />, action: 'mask-smaller' },
+      { label: 'Larger', icon: <Plus />, action: 'mask-larger' },
+      { label: 'Clear', icon: <Trash2 />, action: 'mask-clear', danger: true, disabled: !selected.maskStrokes?.length },
+      { label: 'Object', icon: <ScanSearch />, action: 'object-select' },
+    ]
+  } else if (selected) {
+    const supportsCorners = selected.type === 'rectangle' || (selected.type === 'polygon' && (selected.shapeKind === 'regular' || selected.shapeKind === 'diamond'))
+    if (selected.type === 'text') {
+      items = [
+        { label: 'Edit text', icon: <Type />, action: 'edit-text' },
+        { label: 'Style', icon: <SlidersHorizontal />, action: 'properties' },
+        { label: 'Align', icon: <AlignCenter />, action: 'align' },
+        { label: 'Mask', icon: <Brush />, action: 'mask-brush' },
+        { label: 'Duplicate', icon: <Copy />, action: 'duplicate' },
+        { label: 'Delete', icon: <Trash2 />, action: 'delete', danger: true },
+      ]
+    } else if (selected.type === 'image') {
+      items = [
+        { label: 'Mask brush', icon: <Brush />, action: 'mask-brush' },
+        { label: 'Crop', icon: <Crop />, action: 'crop', active: activeTool === 'crop' },
+        { label: 'Mask shape', icon: <Spline />, action: 'shape-mask' },
+        { label: 'Edit', icon: <SlidersHorizontal />, action: 'properties' },
+        { label: 'Align', icon: <AlignCenter />, action: 'align' },
+        { label: 'Duplicate', icon: <Copy />, action: 'duplicate' },
+        { label: 'Delete', icon: <Trash2 />, action: 'delete', danger: true },
+      ]
+    } else {
+      items = [
+        ...(activeTool === 'corner' ? [{ label: 'Done', icon: <Check />, action: 'mask-done' as MobileToolAction, active: true }] : []),
+        { label: 'Edit', icon: <SlidersHorizontal />, action: 'properties' },
+        { label: 'Fill', icon: <Palette />, action: 'properties' },
+        ...(supportsCorners ? [{ label: 'Corners', icon: <Spline />, action: 'corners' as MobileToolAction, active: activeTool === 'corner' }] : []),
+        { label: 'Align', icon: <AlignCenter />, action: 'align' },
+        { label: 'Arrange', icon: <Layers3 />, action: 'arrange' },
+        { label: 'Mask', icon: <Brush />, action: 'mask-brush' },
+        { label: 'Duplicate', icon: <Copy />, action: 'duplicate' },
+        { label: 'Delete', icon: <Trash2 />, action: 'delete', danger: true },
+      ]
+    }
+  } else {
+    items = [
+      { label: 'Select', icon: <MousePointer2 />, action: 'select', active: activeTool === 'select' },
+      { label: 'Object', icon: <ScanSearch />, action: 'object-select', active: activeTool === 'object-select' },
+      { label: 'Mask', icon: <Brush />, action: 'mask-brush', active: activeTool === 'brush' },
+      { label: 'Shapes', icon: <Shapes />, action: 'shapes', active: ['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(activeTool) },
+      { label: 'Text', icon: <Type />, action: 'text', active: activeTool === 'text' },
+      { label: 'Image', icon: <ImageIcon />, action: 'image', active: activeTool === 'image' },
+      { label: 'Layers', icon: <Layers3 />, action: 'layers' },
+      { label: 'More', icon: <Menu />, action: 'more', active: ['pen', 'corner', 'zoom', 'crop'].includes(activeTool) },
+    ]
+  }
+
   return (
-    <nav className="mobile-toolbar" aria-label="Design tools">
-      {items.map((item) => <button key={item.label} className={item.active ? 'active' : ''} onClick={item.onClick}>{item.icon}<span>{item.label}</span></button>)}
+    <nav className={`mobile-toolbar ${selected ? 'selection-toolbar' : ''}`} aria-label={selected ? `${selected.name} actions` : 'Design tools'}>
+      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
     </nav>
   )
 }
@@ -2610,7 +3023,13 @@ function ArtboardManager({ artboards, activeId, onSwitch, onAdd, onDelete }: {
   )
 }
 
-function MaskPanel({ layer, onUpdate, onMoveImage }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void; onMoveImage: () => void }) {
+function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onClearPaintMask }: {
+  layer: DesignLayer
+  onUpdate: (patch: Partial<DesignLayer>) => void
+  onMoveImage: () => void
+  onBrushMask: () => void
+  onClearPaintMask: () => void
+}) {
   const mask = layer.mask || 'none'
   const masks = [
     { id: 'none' as const, label: 'Rectangle', icon: <Square /> },
@@ -2625,8 +3044,10 @@ function MaskPanel({ layer, onUpdate, onMoveImage }: { layer: DesignLayer; onUpd
       <div className="mask-choice-grid">{masks.map((item) => <button key={item.id} className={mask === item.id ? 'active' : ''} onClick={() => onUpdate({ mask: item.id })} aria-pressed={mask === item.id}>{item.icon}<span>{item.label}</span>{mask === item.id && <i><Check size={11} /></i>}</button>)}</div>
       <SliderField label="Image scale" value={round((layer.imageScale || 1) * 100)} min={100} max={300} unit="%" onChange={(value) => onUpdate({ imageScale: value / 100 })} />
       <div className="mask-panel-actions">
-        <button className="button primary full-button" onClick={onMoveImage}><Move size={17} /> Move image inside mask</button>
-        {mask !== 'none' && <button className="button secondary full-button" onClick={() => onUpdate({ mask: 'none' })}>Remove mask</button>}
+        <button className="button primary full-button" onClick={onBrushMask}><Brush size={17} /> Refine with mask brush</button>
+        <button className="button secondary full-button" onClick={onMoveImage}><Move size={17} /> Move image inside mask</button>
+        {Boolean(layer.maskStrokes?.length) && <button className="button secondary full-button" onClick={onClearPaintMask}>Clear brush mask</button>}
+        {mask !== 'none' && <button className="button secondary full-button" onClick={() => onUpdate({ mask: 'none' })}>Remove shape mask</button>}
       </div>
     </div>
   )
@@ -2650,8 +3071,9 @@ function ShapesGrid({ onAdd }: { onAdd: (type: LayerType, point?: { x: number; y
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
     { id: 'new', label: 'New design', icon: <Plus /> },
+    { id: 'object-select', label: 'Object selection', icon: <ScanSearch /> },
+    { id: 'brush', label: 'Mask brush', icon: <Brush /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
-    { id: 'brush', label: 'Brush tool', icon: <Brush /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
     { id: 'artboards', label: 'Manage artboards', icon: <Frame /> },
@@ -2722,7 +3144,6 @@ function ExportDialog(props: ExportDialogProps) {
           )}
           {format === 'JPG' && <SliderField label="Quality" value={quality} min={1} max={100} unit="%" onChange={setQuality} />}
           {format === 'PNG' && <ToggleRow label="Transparent background" checked={transparent} onChange={setTransparent} />}
-          {format === 'SVG' && <ToggleRow label="Outline text" checked={false} onChange={() => undefined} />}
           <div className="output-summary">
             <div className="output-preview"><div style={{ aspectRatio: `${props.documentMeta.width}/${props.documentMeta.height}` }}><PosterMini /></div></div>
             <div><span>Output size</span><strong>{format === 'SVG' || format === 'PROJECT' ? 'Vector document' : `${outputWidth} × ${outputHeight} px`}</strong><small>Estimated {estimatedMb} MB</small></div>
@@ -2840,36 +3261,42 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
           : `<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${mask === 'rounded' ? Math.min(layer.width, layer.height) * .16 : layer.radius || 0}"/>`
       definition += `<clipPath id="clip-${layer.id}">${shape}</clipPath>`
     }
+    if (layer.maskStrokes?.length) {
+      const maskExtent = Math.max(layer.width, layer.height, 1)
+      const strokes = layer.maskStrokes.map((stroke) => `<path d="${smoothPath(maskStrokePoints(layer, stroke), .55)}" fill="none" stroke="${stroke.mode === 'hide' ? 'black' : 'white'}" stroke-width="${maskStrokeWidth(layer, stroke)}" stroke-linecap="round" stroke-linejoin="round"/>`).join('')
+      definition += `<mask id="paint-mask-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}"><rect x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}" fill="white"/>${strokes}</mask>`
+    }
     return definition
   }).join('')
   const body = layers.filter((layer) => layer.visible).map((layer) => {
     const cx = layer.x + layer.width / 2
     const cy = layer.y + layer.height / 2
-    const transform = `rotate(${layer.rotation} ${cx} ${cy})`
+    const transform = layerTransform(layer)
     const opacity = layer.opacity
     const fill = layer.fillType && layer.fillType !== 'solid' && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
-    if (layer.type === 'rectangle') return `<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}" transform="${transform}"/>`
-    if (layer.type === 'ellipse') return `<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}" transform="${transform}"/>`
-    if (layer.type === 'polygon') return `<path d="${polygonLayerPath(layer)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}" transform="${transform}"/>`
+    const wrap = (element: string) => `<g transform="${transform}"${layer.maskStrokes?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}${layer.blendMode && layer.blendMode !== 'normal' ? ` style="mix-blend-mode:${layer.blendMode}"` : ''}>${element}</g>`
+    if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
     if (layer.type === 'image') {
       const scale = layer.imageScale || 1
       const width = layer.width * scale
       const height = layer.height * scale
       const x = layer.x - (width - layer.width) / 2 + (layer.imageOffsetX || 0)
       const y = layer.y - (height - layer.height) / 2 + (layer.imageOffsetY || 0)
-      return `<image href="${escapeXml(layer.src || '')}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice" clip-path="url(#clip-${layer.id})" opacity="${opacity}" transform="${transform}"/>`
+      return wrap(`<image href="${escapeXml(layer.src || '')}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice" clip-path="url(#clip-${layer.id})" opacity="${opacity}"/>`)
     }
-    if (layer.type === 'line') return `<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}" transform="${transform}"/>`
-    if (layer.type === 'star') return `<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}" transform="${transform}"/>`
+    if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}"/>`)
+    if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'path' || layer.type === 'brush') {
       const points = layerPoints(layer)
       const data = layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))
-      return `<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}" transform="${transform}"/>`
+      return wrap(`<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
     }
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return `<text x="${x}" y="${layer.y + fontSize * 0.84}" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}" transform="${transform}">${(layer.text || '').split('\n').map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`
+    return wrap(`<text x="${x}" y="${layer.y + fontSize * 0.84}" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${(layer.text || '').split('\n').map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
 }
@@ -2878,6 +3305,7 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
   theme: Theme; onToggleTheme: () => void; onNew: () => void; onImport: (file: File) => void; onOpenSample: () => void; onOpenCurrent: () => void; currentName: string; hasCurrent: boolean
 }) {
   const importInputRef = useRef<HTMLInputElement>(null)
+  const [backupHelp, setBackupHelp] = useState(false)
   return (
     <div className="home-screen">
       <HomeHeader theme={theme} onToggleTheme={onToggleTheme} onNew={onNew} />
@@ -2887,7 +3315,7 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
           <div className="home-actions"><button className="button secondary" onClick={() => importInputRef.current?.click()}><Upload size={17} /> Import project</button><button className="button primary" onClick={onNew}><Plus size={18} /> New design</button></div>
         </section>
         <section className="recent-section">
-          <div className="section-title-row"><div><h2>Recent designs</h2><span>{hasCurrent ? 4 : 3} designs</span></div><div className="view-actions"><IconButton label="Grid view" active><LayoutGrid /></IconButton><IconButton label="Search designs"><Search /></IconButton></div></div>
+          <div className="section-title-row"><div><h2>Recent designs</h2><span>{hasCurrent ? 4 : 3} designs</span></div></div>
           <div className="project-grid">
             {hasCurrent && <ProjectCard name={currentName} meta="Edited just now" variant="current" onClick={onOpenCurrent} />}
             <ProjectCard name="Objects & Space" meta="Edited just now" variant="poster" onClick={onOpenSample} />
@@ -2905,7 +3333,7 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
             <button onClick={onNew}><span className="quick-icon custom"><SlidersHorizontal /></span><div><strong>Custom size</strong><small>Set your own dimensions</small></div><Plus /></button>
           </div>
         </section>
-        <div className="backup-reminder"><span><FolderOpen size={19} /></span><div><strong>Keep a backup of your work</strong><p>Your designs are stored on this device only. Export a backup to keep them safe.</p></div><button className="button secondary">Learn how</button></div>
+        <div className="backup-reminder"><span><FolderOpen size={19} /></span><div><strong>Keep a backup of your work</strong><p>Your designs are stored on this device only. Export a backup to keep them safe.</p>{backupHelp && <p className="backup-help" role="status">Open a design, choose Export, then select Project to save an editable .pocket backup.</p>}</div><button className="button secondary" onClick={() => setBackupHelp((visible) => !visible)} aria-expanded={backupHelp}>{backupHelp ? 'Hide guide' : 'Learn how'}</button></div>
       </main>
       <input ref={importInputRef} className="visually-hidden" type="file" accept=".pocket,application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} />
     </div>
@@ -2914,13 +3342,13 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
 
 function HomeHeader({ theme, onToggleTheme, onNew }: { theme: Theme; onToggleTheme: () => void; onNew: () => void }) {
   return (
-    <header className="home-header"><button className="home-brand"><LogoMark /><span>Pocketboard</span></button><nav><button className="active">Designs</button><button>Fonts</button><button>Swatches</button></nav><div><IconButton label="Search"><Search /></IconButton><IconButton label="Settings"><Settings2 /></IconButton><IconButton label={theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={onToggleTheme}>{theme === 'light' ? <Moon /> : <Sun />}</IconButton><button className="button primary compact-new" onClick={onNew}><Plus size={17} /> New</button></div></header>
+    <header className="home-header"><button className="home-brand" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}><LogoMark /><span>Pocketboard</span></button><nav><button className="active" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>Designs</button></nav><div><IconButton label={theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={onToggleTheme}>{theme === 'light' ? <Moon /> : <Sun />}</IconButton><button className="button primary compact-new" onClick={onNew}><Plus size={17} /> New</button></div></header>
   )
 }
 
 function ProjectCard({ name, meta, variant, onClick }: { name: string; meta: string; variant: 'poster' | 'sonder' | 'lagos' | 'current'; onClick: () => void }) {
   return (
-    <article className="project-card"><button className="project-thumbnail" onClick={onClick} aria-label={`Open ${name}`}><div className={`thumbnail-art ${variant}`}>{variant === 'poster' ? <PosterMini /> : variant === 'sonder' ? <><span className="sonder-s">S</span><span className="sonder-label">SONDER®<br />STUDIO</span></> : variant === 'lagos' ? <><span className="lagos-small">CULTURE / DESIGN / PEOPLE</span><strong>LAGOS<br />/26</strong><i /></> : <><span className="current-grid" /><strong>{name.slice(0, 1).toUpperCase()}</strong></>}</div><span className="card-menu"><MoreHorizontal /></span></button><div className="project-card-info"><div><strong>{name}</strong><span>{meta}</span></div><button aria-label={`More options for ${name}`}><MoreHorizontal /></button></div></article>
+    <article className="project-card"><button className="project-thumbnail" onClick={onClick} aria-label={`Open ${name}`}><div className={`thumbnail-art ${variant}`}>{variant === 'poster' ? <PosterMini /> : variant === 'sonder' ? <><span className="sonder-s">S</span><span className="sonder-label">SONDER®<br />STUDIO</span></> : variant === 'lagos' ? <><span className="lagos-small">CULTURE / DESIGN / PEOPLE</span><strong>LAGOS<br />/26</strong><i /></> : <><span className="current-grid" /><strong>{name.slice(0, 1).toUpperCase()}</strong></>}</div></button><div className="project-card-info"><div><strong>{name}</strong><span>{meta}</span></div></div></article>
   )
 }
 
