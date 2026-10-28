@@ -58,11 +58,11 @@ import {
   SlidersHorizontal,
   Smartphone,
   Spline,
+  Sparkles,
   Square,
   Star,
   Sun,
   Trash2,
-  Triangle,
   Type,
   Undo2,
   Unlock,
@@ -86,6 +86,8 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './data'
+import { textLines } from './textLayout'
+import { presetShapePath, shapeCategories } from './shapePresets'
 import type {
   ArtboardSnapshot,
   CanvasGuide,
@@ -194,14 +196,17 @@ function App() {
   const [zoom, setZoom] = useState(68)
   const [mobileSheet, setMobileSheet] = useState<MobileSheet>(null)
   const [exportOpen, setExportOpen] = useState(false)
-  const [savingState, setSavingState] = useState<'Saving' | 'Saved'>('Saved')
+  const [savingState, setSavingState] = useState<'Saving' | 'Saved' | 'Not saved'>('Saved')
   const [toast, setToast] = useState<string | null>(null)
+  const [draggingFiles, setDraggingFiles] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const artboardRef = useRef<SVGSVGElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const clipboardRef = useRef<DesignLayer | null>(null)
   const toastTimerRef = useRef<number | null>(null)
   const layersRef = useRef(layers)
+  const activeArtboardRef = useRef(activeArtboardId)
+  activeArtboardRef.current = activeArtboardId
   const textEditSnapshotRef = useRef<DesignLayer[] | null>(null)
 
   useEffect(() => {
@@ -236,18 +241,24 @@ function App() {
   useEffect(() => {
     setSavingState('Saving')
     const timer = window.setTimeout(() => {
-      localStorage.setItem('pocketboard-layers', JSON.stringify(layers))
-      localStorage.setItem('pocketboard-document-meta', JSON.stringify(documentMeta))
-      localStorage.setItem('pocketboard-project-name', projectName)
-      localStorage.setItem('pocketboard-active-artboard', activeArtboardId)
-      localStorage.setItem('pocketboard-artboards', JSON.stringify(artboards.map((artboard) => artboard.id === activeArtboardId
-        ? { ...artboard, document: documentMeta, layers }
-        : artboard)))
-      localStorage.setItem('pocketboard-grid', String(gridVisible))
-      localStorage.setItem('pocketboard-grid-size', String(gridSize))
-      localStorage.setItem('pocketboard-guides-visible', String(guidesVisible))
-      localStorage.setItem('pocketboard-guides', JSON.stringify(canvasGuides))
-      setSavingState('Saved')
+      try {
+        localStorage.setItem('pocketboard-layers', JSON.stringify(layers))
+        localStorage.setItem('pocketboard-document-meta', JSON.stringify(documentMeta))
+        localStorage.setItem('pocketboard-project-name', projectName)
+        localStorage.setItem('pocketboard-active-artboard', activeArtboardId)
+        localStorage.setItem('pocketboard-artboards', JSON.stringify(artboards.map((artboard) => artboard.id === activeArtboardId
+          ? { ...artboard, document: documentMeta, layers }
+          : artboard)))
+        localStorage.setItem('pocketboard-grid', String(gridVisible))
+        localStorage.setItem('pocketboard-grid-size', String(gridSize))
+        localStorage.setItem('pocketboard-guides-visible', String(guidesVisible))
+        localStorage.setItem('pocketboard-guides', JSON.stringify(canvasGuides))
+        setSavingState('Saved')
+      } catch {
+        setSavingState('Not saved')
+        if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+        setToast('Device storage is full. Export a project backup.')
+      }
     }, 500)
     return () => window.clearTimeout(timer)
   }, [layers, documentMeta, projectName, activeArtboardId, artboards, gridVisible, gridSize, guidesVisible, canvasGuides])
@@ -539,6 +550,7 @@ function App() {
       sides: type === 'polygon' ? 6 : undefined,
       shapeKind: type === 'polygon' ? 'regular' : undefined,
       text: type === 'text' ? 'Type something' : undefined,
+      textWrap: type === 'text' ? true : undefined,
       fontSize: type === 'text' ? 56 : undefined,
       fontWeight: type === 'text' ? 600 : undefined,
       fontFamily: type === 'text' ? 'Inter' : undefined,
@@ -586,25 +598,50 @@ function App() {
     setSelectedId(layer.id)
   }, [commitLayers])
 
-  const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const imageLayer: DesignLayer = {
-        id: makeId(), name: file.name.replace(/\.[^/.]+$/, '') || 'Image', type: 'image',
-        x: documentMeta.width * 0.25, y: documentMeta.height * 0.25,
-        width: documentMeta.width * 0.5, height: documentMeta.height * 0.42,
-        rotation: 0, opacity: 1, visible: true, locked: false,
-        fill: '#E8E8EA', fillType: 'solid', stroke: 'transparent', strokeWidth: 0, radius: 0,
-        src: String(reader.result), mask: 'none', imageOffsetX: 0, imageOffsetY: 0, imageScale: 1,
+  const importImages = async (files: File[], point?: Point) => {
+    const targetArtboard = activeArtboardId
+    const images = files.filter((file) => file.type.startsWith('image/'))
+    if (!images.length) { showToast('Choose an image file'); return }
+    const read = (file: File) => new Promise<DesignLayer>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onerror = () => reject(new Error('Read failed'))
+      reader.onload = () => {
+        const src = String(reader.result)
+        const image = new Image()
+        image.onerror = () => reject(new Error('Invalid image'))
+        image.onload = () => {
+          const scale = Math.min(documentMeta.width * .5 / image.naturalWidth, documentMeta.height * .5 / image.naturalHeight, 1)
+          const width = Math.max(1, image.naturalWidth * scale)
+          const height = Math.max(1, image.naturalHeight * scale)
+          resolve({
+            id: makeId(), name: file.name.replace(/\.[^/.]+$/, '') || 'Image', type: 'image',
+            x: (point?.x ?? documentMeta.width / 2) - width / 2,
+            y: (point?.y ?? documentMeta.height / 2) - height / 2,
+            width, height, rotation: 0, opacity: 1, visible: true, locked: false,
+            fill: '#E8E8EA', fillType: 'solid', stroke: 'transparent', strokeWidth: 0, radius: 0,
+            src, mask: 'none', imageOffsetX: 0, imageOffsetY: 0, imageScale: 1,
+          })
+        }
+        image.src = src
       }
-      commitLayers([...layersRef.current, imageLayer], 'Image added')
-      setSelectedId(imageLayer.id)
+      reader.readAsDataURL(file)
+    })
+    const results = await Promise.allSettled(images.map(read))
+    if (targetArtboard !== activeArtboardRef.current) { showToast('Import cancelled after switching artboards'); return }
+    const added = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+    if (added.length) {
+      commitLayers([...layersRef.current, ...added], added.length === 1 ? 'Image added' : `${added.length} images added`)
+      setSelectedId(added[added.length - 1].id)
       setActiveTool('select')
+      setMobileSheet(null)
     }
-    reader.readAsDataURL(file)
+    if (added.length !== files.length) showToast('Some files could not be imported')
+  }
+
+  const handleImageUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
     event.target.value = ''
+    if (files.length) void importImages(files)
   }
 
   useEffect(() => {
@@ -804,7 +841,14 @@ function App() {
   const exportArtboards = [...syncedArtboards.filter((artboard) => artboard.id === activeArtboardId), ...syncedArtboards.filter((artboard) => artboard.id !== activeArtboardId)]
 
   return (
-    <div className="app-shell editor-app">
+    <div className="app-shell editor-app"
+      onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() }}
+      onDrop={(event) => {
+        if (!event.dataTransfer.types.includes('Files')) return
+        event.preventDefault()
+        setDraggingFiles(false)
+        void importImages(Array.from(event.dataTransfer.files))
+      }}>
       <TopBar
         projectName={projectName}
         setProjectName={setProjectName}
@@ -821,6 +865,24 @@ function App() {
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
         onShare={shareDesign}
+      />
+
+      <EditorMenu
+        onNew={() => navigate('new')}
+        onImport={() => imageInputRef.current?.click()}
+        onExport={() => setExportOpen(true)}
+        onUndo={undo} onRedo={redo} canUndo={past.length > 0} canRedo={future.length > 0}
+        onDuplicate={duplicateSelected} onDelete={deleteSelected} hasSelection={Boolean(selected)}
+        onDeselect={() => { finishTextEditing(); setSelectedId(null); setActiveTool('select') }}
+        onSelectTool={() => { finishTextEditing(); setActiveTool('select') }}
+        onObjectSelect={() => { finishTextEditing(); setActiveTool('object-select') }}
+        onGrid={() => setGridVisible((visible) => !visible)} gridVisible={gridVisible}
+        onGuides={toggleGuides} guidesVisible={guidesVisible}
+        onZoomIn={() => setZoom((value) => clamp(value + 15, 5, 6400))}
+        onZoomOut={() => setZoom((value) => clamp(value - 15, 5, 6400))}
+        onBrowseShapes={() => setMobileSheet('shapes')}
+        onInsertStarburst={() => addLayer('polygon', undefined, { name: 'Starburst', shapeKind: 'starburst', sides: 12, burstInset: 45 })}
+        onInsertSunburst={() => addLayer('polygon', undefined, { name: 'Sunburst', shapeKind: 'sunburst', sides: 16, burstInset: 25 })}
       />
 
       <div className="editor-body">
@@ -858,7 +920,21 @@ function App() {
           />
         </aside>
 
-        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''}`} aria-label="Design canvas">
+        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''}`} aria-label="Design canvas"
+          onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingFiles(true) } }}
+          onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false) }}
+          onDrop={(event) => {
+            if (!event.dataTransfer.types.includes('Files')) return
+            event.preventDefault()
+            event.stopPropagation()
+            setDraggingFiles(false)
+            const rect = artboardRef.current?.getBoundingClientRect()
+            const point = rect && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom
+              ? { x: (event.clientX - rect.left) * documentMeta.width / rect.width, y: (event.clientY - rect.top) * documentMeta.height / rect.height }
+              : undefined
+            void importImages(Array.from(event.dataTransfer.files), point)
+          }}>
+          {draggingFiles && <div className="import-drop-hint">Drop images to import</div>}
           <ArtboardBar
             artboards={syncedArtboards}
             activeId={activeArtboardId}
@@ -1020,7 +1096,7 @@ function App() {
               insideSheet
             />
           )}
-          {mobileSheet === 'shapes' && <ShapesGrid onAdd={addLayer} />}
+          {mobileSheet === 'shapes' && <ShapesGrid onAdd={(type, point, preset) => { addLayer(type, point, preset); setMobileSheet(null) }} />}
           {mobileSheet === 'artboards' && (
             <ArtboardManager
               artboards={syncedArtboards}
@@ -1072,7 +1148,7 @@ function App() {
         />
       )}
 
-      <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/*" onChange={handleImageUpload} />
+      <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={handleImageUpload} />
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
   )
@@ -1083,7 +1159,7 @@ interface TopBarProps {
   setProjectName: (name: string) => void
   renaming: boolean
   setRenaming: (value: boolean) => void
-  savingState: 'Saving' | 'Saved'
+  savingState: 'Saving' | 'Saved' | 'Not saved'
   canUndo: boolean
   canRedo: boolean
   onUndo: () => void
@@ -1127,7 +1203,7 @@ function TopBar(props: TopBarProps) {
               <span>{props.projectName}</span><ChevronDown size={14} />
             </button>
           )}
-          <span className={`save-status ${props.savingState.toLowerCase()}`}><span className="status-dot" />{props.savingState}</span>
+          <span className={`save-status ${props.savingState.toLowerCase().replace(' ', '-')}`}><span className="status-dot" />{props.savingState}</span>
         </div>
         <div className="history-controls">
           <IconButton label="Undo" shortcut="Ctrl Z" onClick={props.onUndo} disabled={!props.canUndo}><Undo2 /></IconButton>
@@ -1143,6 +1219,75 @@ function TopBar(props: TopBarProps) {
       </div>
     </header>
   )
+}
+
+type EditorMenuProps = {
+  onNew: () => void; onImport: () => void; onExport: () => void
+  onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean
+  onDuplicate: () => void; onDelete: () => void; hasSelection: boolean
+  onDeselect: () => void; onSelectTool: () => void; onObjectSelect: () => void
+  onGrid: () => void; gridVisible: boolean; onGuides: () => void; guidesVisible: boolean
+  onZoomIn: () => void; onZoomOut: () => void
+  onBrowseShapes: () => void; onInsertStarburst: () => void; onInsertSunburst: () => void
+}
+
+function EditorMenu(props: EditorMenuProps) {
+  const [open, setOpen] = useState<string | null>(null)
+  const ref = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) setOpen(null)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    return () => document.removeEventListener('pointerdown', dismiss)
+  }, [open])
+  const groups = [
+    { name: 'File', items: [
+      { label: 'New design', action: props.onNew },
+      { label: 'Import from device', action: props.onImport },
+      { label: 'Export', action: props.onExport },
+    ] },
+    { name: 'Edit', items: [
+      { label: 'Undo', action: props.onUndo, disabled: !props.canUndo },
+      { label: 'Redo', action: props.onRedo, disabled: !props.canRedo },
+      { label: 'Duplicate', action: props.onDuplicate, disabled: !props.hasSelection },
+      { label: 'Delete', action: props.onDelete, disabled: !props.hasSelection },
+    ] },
+    { name: 'Select', items: [
+      { label: 'Select tool', action: props.onSelectTool },
+      { label: 'Object selection', action: props.onObjectSelect },
+      { label: 'Deselect', action: props.onDeselect, disabled: !props.hasSelection },
+    ] },
+    { name: 'Insert', items: [
+      { label: 'Browse shapes', action: props.onBrowseShapes },
+      { label: 'Starburst', action: props.onInsertStarburst },
+      { label: 'Sunburst', action: props.onInsertSunburst },
+    ] },
+    { name: 'View', items: [
+      { label: props.gridVisible ? 'Hide grid' : 'Show grid', action: props.onGrid },
+      { label: props.guidesVisible ? 'Hide guides' : 'Show guides', action: props.onGuides },
+      { label: 'Zoom in', action: props.onZoomIn },
+      { label: 'Zoom out', action: props.onZoomOut },
+    ] },
+  ]
+  return <nav className="editor-menu" ref={ref} aria-label="Editor menu" onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(null)
+  }} onKeyDown={(event) => {
+    event.stopPropagation()
+    if (event.key === 'Escape' && open) {
+      event.preventDefault()
+      setOpen(null)
+      ref.current?.querySelector<HTMLButtonElement>(`[data-menu-button="${open}"]`)?.focus()
+    }
+  }}>
+    {groups.map((group) => <div className="editor-menu-group" key={group.name}>
+      <button className={open === group.name ? 'active' : ''} data-menu-button={group.name} aria-expanded={open === group.name} onClick={() => setOpen(open === group.name ? null : group.name)}>{group.name}</button>
+      {open === group.name && <div className="editor-menu-popup" aria-label={`${group.name} options`}>
+        {group.items.map((item) => <button key={item.label} disabled={item.disabled} onClick={() => { setOpen(null); item.action() }}>{item.label}</button>)}
+      </div>}
+    </div>)}
+  </nav>
 }
 
 function LogoMark({ size = 30 }: { size?: number }) {
@@ -1736,10 +1881,17 @@ function Canvas(props: CanvasProps) {
           if (handle.includes('n')) height = Math.max(minimumHeight, original.height - localDy)
         }
 
+        if (original.type === 'text' && !isCorner && (handle === 'e' || handle === 'w')) {
+          const lineHeight = (original.fontSize || 32) * (original.lineHeight || 1.2)
+          height = Math.max(lineHeight, textLines({ ...original, width, textWrap: true }).length * lineHeight)
+        }
+
         const shiftX = handle.includes('e')
           ? (width - original.width) / 2
           : handle.includes('w') ? -(width - original.width) / 2 : 0
-        const shiftY = handle.includes('s')
+        const shiftY = original.type === 'text' && !isCorner && (handle === 'e' || handle === 'w')
+          ? (height - original.height) / 2
+          : handle.includes('s')
           ? (height - original.height) / 2
           : handle.includes('n') ? -(height - original.height) / 2 : 0
         const worldShiftX = shiftX * cos - shiftY * sin
@@ -1751,9 +1903,9 @@ function Canvas(props: CanvasProps) {
           y: originalCenterY + worldShiftY - height / 2,
           width,
           height,
-          ...(original.type === 'text' && original.width > 0 && original.height > 0 ? {
+          ...(original.type === 'text' && !isCorner && (handle === 'e' || handle === 'w') ? { textWrap: true } : {}),
+          ...(original.type === 'text' && isCorner && original.height > 0 ? {
             fontSize: (original.fontSize || 32) * height / original.height,
-            textScaleX: (original.textScaleX || 1) * (width / original.width) / (height / original.height),
             ...(original.letterSpacing !== undefined ? { letterSpacing: original.letterSpacing * height / original.height } : {}),
           } : {}),
         })
@@ -1976,7 +2128,7 @@ function Canvas(props: CanvasProps) {
       event.stopPropagation()
       event.preventDefault()
       props.onSelect(layer.id)
-    } else if (props.activeTool === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))) {
+    } else if (props.activeTool === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && ((layer.shapeKind || 'regular') === 'regular' || layer.shapeKind === 'diamond' || layer.shapeKind === 'starburst')))) {
       event.stopPropagation()
       props.onSelect(layer.id)
     } else if (props.activeTool === 'crop' && layer.type === 'image') {
@@ -2192,7 +2344,7 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
   } else if (layer.type === 'ellipse') {
     content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'polygon') {
-    content = <path {...common} d={polygonLayerPath(layer)} fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} strokeLinejoin="round" />
+    content = <path {...common} d={polygonLayerPath(layer)} fillRule="evenodd" fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} strokeLinejoin="round" />
   } else if (layer.type === 'image') {
     const scale = layer.imageScale || 1
     const imageWidth = layer.width * scale
@@ -2208,12 +2360,12 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
     const points = layerPoints(layer)
     content = <path {...common} d={layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))} fill={layer.closed ? fill : 'none'} stroke={layer.stroke} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
   } else {
-    const lines = (layer.text || '').split('\n')
+    const lines = textLines(layer)
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
     content = (
-      <text {...common} x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
+      <text {...common} xmlSpace="preserve" x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
         {lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{line}</tspan>)}
       </text>
     )
@@ -2248,7 +2400,7 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
   const transform = layerTransform(layer)
   const updateValue = (text: string) => {
     setValue(text)
-    const lines = Math.max(1, text.split('\n').length)
+    const lines = textLines({ ...layer, text }).length
     const height = Math.max(layer.height, lines * fontSize * (layer.lineHeight || 1.2))
     onUpdate({ text, height })
   }
@@ -2345,8 +2497,8 @@ function roundedPolygonPath(points: Point[], radius: number) {
     const amount = Math.min(radius, previousDistance * .35, nextDistance * .35)
     return {
       point,
-      before: { x: point.x + (previous.x - point.x) / previousDistance * amount, y: point.y + (previous.y - point.y) / previousDistance * amount },
-      after: { x: point.x + (next.x - point.x) / nextDistance * amount, y: point.y + (next.y - point.y) / nextDistance * amount },
+      before: { x: point.x + (previous.x - point.x) / (previousDistance || 1) * amount, y: point.y + (previous.y - point.y) / (previousDistance || 1) * amount },
+      after: { x: point.x + (next.x - point.x) / (nextDistance || 1) * amount, y: point.y + (next.y - point.y) / (nextDistance || 1) * amount },
     }
   })
   let path = `M ${segments[0].before.x} ${segments[0].before.y} Q ${segments[0].point.x} ${segments[0].point.y} ${segments[0].after.x} ${segments[0].after.y}`
@@ -2358,6 +2510,8 @@ function roundedPolygonPath(points: Point[], radius: number) {
 }
 
 function polygonLayerPath(layer: DesignLayer) {
+  const presetPath = presetShapePath(layer)
+  if (presetPath !== null) return presetPath
   const cx = layer.x + layer.width / 2
   const cy = layer.y + layer.height / 2
   if (layer.shapeKind === 'arrow') {
@@ -2370,6 +2524,28 @@ function polygonLayerPath(layer: DesignLayer) {
   }
   if (layer.shapeKind === 'heart') {
     return `M ${cx} ${layer.y + layer.height} C ${layer.x - layer.width * .08} ${layer.y + layer.height * .58}, ${layer.x + layer.width * .05} ${layer.y}, ${layer.x + layer.width * .28} ${layer.y} C ${layer.x + layer.width * .43} ${layer.y}, ${cx} ${layer.y + layer.height * .13}, ${cx} ${layer.y + layer.height * .25} C ${cx} ${layer.y + layer.height * .13}, ${layer.x + layer.width * .57} ${layer.y}, ${layer.x + layer.width * .72} ${layer.y} C ${layer.x + layer.width * .95} ${layer.y}, ${layer.x + layer.width * 1.08} ${layer.y + layer.height * .58}, ${cx} ${layer.y + layer.height} Z`
+  }
+  if (layer.shapeKind === 'starburst' || layer.shapeKind === 'sunburst') {
+    const count = clamp(Math.round(layer.sides || (layer.shapeKind === 'sunburst' ? 16 : 12)), 3, 32)
+    const inset = clamp(layer.burstInset ?? (layer.shapeKind === 'sunburst' ? 25 : 45), 5, 90)
+    const inner = 1 - inset / 100
+    const vertices = Array.from({ length: count * 2 }, (_, index) => {
+      const angle = -Math.PI / 2 + index * Math.PI / count
+      const radius = index % 2 ? inner : 1
+      return { x: cx + Math.cos(angle) * layer.width / 2 * radius, y: cy + Math.sin(angle) * layer.height / 2 * radius }
+    })
+    if (layer.shapeKind === 'starburst') return roundedPolygonPath(vertices, Math.max(0, layer.radius || 0))
+    // Each curved edge passes through its recessed midpoint, producing a sunburst.
+    let path = `M ${vertices[0].x} ${vertices[0].y}`
+    for (let index = 0; index < count; index += 1) {
+      const start = vertices[index * 2]
+      const valley = vertices[index * 2 + 1]
+      const end = vertices[(index * 2 + 2) % vertices.length]
+      const controlX = 2 * valley.x - (start.x + end.x) / 2
+      const controlY = 2 * valley.y - (start.y + end.y) / 2
+      path += ` Q ${controlX} ${controlY} ${end.x} ${end.y}`
+    }
+    return `${path} Z`
   }
   const offset = layer.shapeKind === 'diamond' ? 0 : -Math.PI / 2
   const vertices = regularPolygonVertices(cx, cy, layer.width / 2, layer.height / 2, layer.shapeKind === 'diamond' ? 4 : layer.sides || 6, offset)
@@ -2408,7 +2584,7 @@ function SelectionOverlay({ layer, mode, handleScale, onResize, onRotate, onCorn
     { id: 'sw', x: layer.x, y: layer.y + height, cursor: 'nesw-resize' },
   ]
   const standard = mode === 'select'
-  const cornerMode = mode === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))
+  const cornerMode = mode === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && ((layer.shapeKind || 'regular') === 'regular' || layer.shapeKind === 'diamond' || layer.shapeKind === 'starburst')))
   const cropMode = mode === 'crop' && layer.type === 'image'
   return (
     <g transform={transform} className={`selection-overlay ${cropMode ? 'crop-selection' : ''}`} aria-hidden="true">
@@ -2666,6 +2842,37 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           })}
         </div>
       )}
+      {layer.type === 'polygon' && (layer.shapeKind === 'stamp' || layer.shapeKind === 'stamp-rectangle') && (
+        <PropertySection title="Stamp">
+          <div className="stamp-options" aria-label="Stamp shape">
+            <button className={layer.shapeKind === 'stamp' ? 'selected' : ''} aria-pressed={layer.shapeKind === 'stamp'} onClick={() => props.onUpdate({ shapeKind: 'stamp' })}>Round</button>
+            <button className={layer.shapeKind === 'stamp-rectangle' ? 'selected' : ''} aria-pressed={layer.shapeKind === 'stamp-rectangle'} onClick={() => props.onUpdate({ shapeKind: 'stamp-rectangle' })}>Rectangle</button>
+          </div>
+          {layer.shapeKind === 'stamp-rectangle' && <button className="button secondary full-button" onClick={() => {
+            const size = Math.max(20, layer.width)
+            props.onUpdate({ width: size, height: size, x: layer.x + (layer.width - size) / 2, y: layer.y + (layer.height - size) / 2 })
+          }}>Make square</button>}
+        </PropertySection>
+      )}
+      {layer.type === 'polygon' && layer.shapeKind !== 'stamp' && layer.shapeKind !== 'stamp-rectangle' && (
+        <PropertySection title="Polygon">
+          <div className="shape-kind-grid" aria-label="Custom shape">
+            <button className={(layer.shapeKind || 'regular') === 'regular' ? 'active' : ''} aria-pressed={(layer.shapeKind || 'regular') === 'regular'} onClick={() => props.onUpdate({ shapeKind: 'regular', sides: layer.sides || 6 })}><Hexagon /><span>Polygon</span></button>
+            <button className={layer.shapeKind === 'diamond' ? 'active' : ''} aria-pressed={layer.shapeKind === 'diamond'} onClick={() => props.onUpdate({ shapeKind: 'diamond', sides: 4 })}><Diamond /><span>Diamond</span></button>
+            <button className={layer.shapeKind === 'arrow' ? 'active' : ''} aria-pressed={layer.shapeKind === 'arrow'} onClick={() => { if (props.activeTool === 'corner') props.onActivateTool('select'); props.onUpdate({ shapeKind: 'arrow' }) }}><Move /><span>Arrow</span></button>
+            <button className={layer.shapeKind === 'heart' ? 'active' : ''} aria-pressed={layer.shapeKind === 'heart'} onClick={() => { if (props.activeTool === 'corner') props.onActivateTool('select'); props.onUpdate({ shapeKind: 'heart' }) }}><Heart /><span>Heart</span></button>
+            <button className={layer.shapeKind === 'starburst' ? 'active' : ''} aria-pressed={layer.shapeKind === 'starburst'} onClick={() => props.onUpdate({ shapeKind: 'starburst', sides: clamp(layer.sides || 12, 3, 32) })}><Sparkles /><span>Starburst</span></button>
+            <button className={layer.shapeKind === 'sunburst' ? 'active' : ''} aria-pressed={layer.shapeKind === 'sunburst'} onClick={() => { if (props.activeTool === 'corner') props.onActivateTool('select'); props.onUpdate({ shapeKind: 'sunburst', sides: clamp(layer.sides || 16, 3, 32) }) }}><Sun /><span>Sunburst</span></button>
+          </div>
+          {(layer.shapeKind || 'regular') === 'regular' && <SliderField label="Sides" value={layer.sides || 6} min={3} max={32} unit="" onChange={(sides) => props.onUpdate({ sides: clamp(round(sides), 3, 32) })} />}
+          {(layer.shapeKind === 'starburst' || layer.shapeKind === 'sunburst') && <>
+            <SliderField label="Points" value={clamp(layer.sides || (layer.shapeKind === 'sunburst' ? 16 : 12), 3, 32)} min={3} max={32} unit="" onChange={(sides) => props.onUpdate({ sides: clamp(round(sides), 3, 32) })} />
+            <SliderField label="Inset" value={clamp(layer.burstInset ?? (layer.shapeKind === 'sunburst' ? 25 : 45), 5, 90)} min={5} max={90} unit="%" onChange={(value) => props.onUpdate({ burstInset: clamp(round(value), 5, 90) })} />
+          </>}
+          {((layer.shapeKind || 'regular') === 'regular' || layer.shapeKind === 'diamond' || layer.shapeKind === 'starburst') && <><SliderField label="Corner radius" value={round(layer.radius || 0)} min={0} max={round(Math.min(layer.width, layer.height) / 3)} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
+        </PropertySection>
+      )}
+
       <PropertySection title="Position" actions={<button className={`link-toggle ${linked ? 'active' : ''}`} onClick={() => setLinked(!linked)} aria-label="Lock proportions"><Link2 size={14} /></button>}>
         <div className="dimension-pair">
           <NumberInput label="X" value={round(layer.x)} onChange={(value) => props.onUpdate({ x: value })} />
@@ -2733,18 +2940,6 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         </PropertySection>
       )}
 
-      {layer.type === 'polygon' && (
-        <PropertySection title="Polygon">
-          <div className="shape-kind-grid" aria-label="Custom shape">
-            <button className={(layer.shapeKind || 'regular') === 'regular' ? 'active' : ''} onClick={() => props.onUpdate({ shapeKind: 'regular', sides: layer.sides || 6 })}><Hexagon /><span>Polygon</span></button>
-            <button className={layer.shapeKind === 'diamond' ? 'active' : ''} onClick={() => props.onUpdate({ shapeKind: 'diamond', sides: 4 })}><Diamond /><span>Diamond</span></button>
-            <button className={layer.shapeKind === 'arrow' ? 'active' : ''} onClick={() => props.onUpdate({ shapeKind: 'arrow' })}><Move /><span>Arrow</span></button>
-            <button className={layer.shapeKind === 'heart' ? 'active' : ''} onClick={() => props.onUpdate({ shapeKind: 'heart' })}><Heart /><span>Heart</span></button>
-          </div>
-          {layer.shapeKind === 'regular' && <SliderField label="Sides" value={layer.sides || 6} min={3} max={12} unit="" onChange={(sides) => props.onUpdate({ sides: round(sides) })} />}
-          {(layer.shapeKind === 'regular' || layer.shapeKind === 'diamond') && <><SliderField label="Corner radius" value={round(layer.radius || 0)} min={0} max={round(Math.min(layer.width, layer.height) / 3)} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
-        </PropertySection>
-      )}
 
       {layer.type !== 'image' && layer.type !== 'line' && layer.type !== 'brush' && (
         <PropertySection title="Fill">
@@ -2870,8 +3065,8 @@ function SelectField({ label, value, options, onChange, compact }: { label: stri
 function SliderField({ label, value, min, max, unit, onChange }: { label: string; value: number; min: number; max: number; unit: string; onChange: (value: number) => void }) {
   return (
     <div className="slider-field">
-      <div><span>{label}</span><label><input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} /><small>{unit}</small></label></div>
-      <input type="range" min={min} max={max} value={value} style={{ '--range-progress': `${(value - min) / (max - min) * 100}%` } as CSSProperties} onChange={(event) => onChange(Number(event.target.value))} />
+      <div><span>{label}</span><label><input type="number" aria-label={`${label} value`} min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /><small>{unit}</small></label></div>
+      <input type="range" aria-label={label} min={min} max={max} value={value} style={{ '--range-progress': `${(value - min) / (max - min) * 100}%` } as CSSProperties} onChange={(event) => onChange(Number(event.target.value))} />
     </div>
   )
 }
@@ -2906,7 +3101,7 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
       { label: 'Object', icon: <ScanSearch />, action: 'object-select' },
     ]
   } else if (selected) {
-    const supportsCorners = selected.type === 'rectangle' || (selected.type === 'polygon' && (selected.shapeKind === 'regular' || selected.shapeKind === 'diamond'))
+    const supportsCorners = selected.type === 'rectangle' || (selected.type === 'polygon' && ((selected.shapeKind || 'regular') === 'regular' || selected.shapeKind === 'diamond' || selected.shapeKind === 'starburst'))
     if (selected.type === 'text') {
       items = [
         editingText
@@ -3096,18 +3291,31 @@ function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onClearPaintMask
 }
 
 function ShapesGrid({ onAdd }: { onAdd: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => void }) {
-  const shapes: { id: string; type: LayerType; label: string; icon: ReactNode; preset?: Partial<DesignLayer> }[] = [
-    { id: 'rectangle', type: 'rectangle', label: 'Rectangle', icon: <Square /> },
-    { id: 'ellipse', type: 'ellipse', label: 'Ellipse', icon: <Circle /> },
-    { id: 'triangle', type: 'polygon', label: 'Triangle', icon: <Triangle />, preset: { name: 'Triangle', sides: 3, shapeKind: 'regular' } },
-    { id: 'polygon', type: 'polygon', label: 'Polygon', icon: <Hexagon />, preset: { sides: 6, shapeKind: 'regular' } },
-    { id: 'star', type: 'star', label: 'Star', icon: <Star /> },
-    { id: 'diamond', type: 'polygon', label: 'Diamond', icon: <Diamond />, preset: { name: 'Diamond', sides: 4, shapeKind: 'diamond' } },
-    { id: 'arrow', type: 'polygon', label: 'Arrow', icon: <Move />, preset: { name: 'Arrow', shapeKind: 'arrow' } },
-    { id: 'heart', type: 'polygon', label: 'Heart', icon: <Heart />, preset: { name: 'Heart', shapeKind: 'heart', fill: '#FF5C47' } },
-    { id: 'line', type: 'line', label: 'Line', icon: <Minus /> },
-  ]
-  return <div className="shapes-grid custom-shapes-grid">{shapes.map((shape) => <button key={shape.id} onClick={() => onAdd(shape.type, undefined, shape.preset)}>{shape.icon}<span>{shape.label}</span></button>)}</div>
+  return <div className="shape-library">
+    <p className="shape-library-intro">Choose a shape to add it to the artboard.</p>
+    {shapeCategories.map((category) => <section className="shape-category" key={category.name} aria-label={category.name}>
+      <h3>{category.name}</h3>
+      <div className="shapes-grid custom-shapes-grid">
+        {category.shapes.map((shape) => {
+          const preview: DesignLayer = {
+            id: 'preview', name: shape.label, type: shape.type, x: 2, y: 2, width: 28, height: 28,
+            rotation: 0, opacity: 1, visible: true, locked: false, fill: 'currentColor', stroke: 'currentColor', strokeWidth: 1,
+            ...shape.preset,
+          }
+          return <button key={shape.label} onClick={() => onAdd(shape.type, undefined, shape.preset)}>
+            <svg viewBox="0 0 32 32" aria-hidden="true">
+              {shape.type === 'polygon' ? <path d={polygonLayerPath(preview)} fillRule="evenodd" />
+                : shape.type === 'rectangle' ? <rect x="3" y="4" width="26" height="24" rx="2" />
+                  : shape.type === 'ellipse' ? <ellipse cx="16" cy="16" rx="13" ry="12" />
+                    : shape.type === 'star' ? <polygon points={starPoints(16, 16, 14, 6)} />
+                      : <line x1="3" y1="27" x2="29" y2="5" stroke="currentColor" strokeWidth="2" />}
+            </svg>
+            <span>{shape.label}</span>
+          </button>
+        })}
+      </div>
+    </section>)}
+  </div>
 }
 
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
@@ -3319,7 +3527,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const wrap = (element: string) => `<g transform="${transform}"${layer.maskStrokes?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}${layer.blendMode && layer.blendMode !== 'normal' ? ` style="mix-blend-mode:${layer.blendMode}"` : ''}>${element}</g>`
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
-    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
+    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
     if (layer.type === 'image') {
       const scale = layer.imageScale || 1
       const width = layer.width * scale
@@ -3338,7 +3546,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return wrap(`<text x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${(layer.text || '').split('\n').map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
+    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLines(layer).map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
 }

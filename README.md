@@ -21,12 +21,14 @@ npm run preview
 - Workspace-first launch with recent designs, quick-start presets, and project import
 - Responsive editor layouts for desktop, tablet, portrait phone, and short-screen landscape use
 - Interactive SVG artboard with object selection, moving, rotation, proportional corner resizing, and independent side resizing
-- Shape and text tools: tap text to select and transform it, double-tap or double-click to edit its content, then use Done or tap outside to return to transform controls; drag side or corner handles to resize text
-- Image import, layers, visibility, lock, drag or keyboard reordering, duplicate, and delete
+- Shape and text tools: tap text to select and transform it, double-tap or double-click to edit its content, then use Done or tap outside to return to transform controls; drag side handles to wrap text or corner handles to scale it
+- File, Edit, Select, and View menus; import images and SVG elements from a device or drop them onto the canvas (SVGs are placed as images)
+- Layers, visibility, lock, drag or keyboard reordering, duplicate, and delete
 - Pen paths plus a non-destructive hide/restore mask brush with object selection, adjustable size, clearing, and undo
 - Selection-aware mobile actions for shape corners, fills, alignment, image crops, masks, text styling, duplication, and deletion
 - Linear and radial gradients, document swatches, blend modes, flipping, and native screen eyedropper support
-- Rectangles, ellipses, stars, adjustable polygons, triangles, diamonds, arrows, hearts, and interactive corner editing
+- A grouped shape library with decorative, UI, infographic, geometric, stamp, and indicator presets, including round and rectangular stamps with a square option; editable polygons, starbursts, sunbursts, and corner controls
+- Pie and donut chart presets are static shapes, not data-driven charts
 - Non-destructive image repositioning, scaling, and rectangle, rounded, ellipse, or star masks, with a dedicated compact-screen workflow
 - Artboard alignment controls, snapping smart guides, draggable ruler guides, and adjustable layout grids
 - Multiple artboards with switching, adding, deleting, local persistence, project-file backup, and a touch-first manager available by tap or long-press
@@ -38,3 +40,5 @@ npm run preview
 - PWA manifest and offline runtime cache
 
 All project state remains in the browser's local storage; there is no backend or account system.
+
+Imported images are stored in the browser and may be limited by device storage. Export a project backup if the editor reports that it cannot save.

@@ -3774,9 +3774,9 @@ button:disabled {
   margin: 0;
   padding: 0;
   overflow: auto;
-  border: 4px solid var(--accent);
+  border: 0;
   border-radius: 3px;
-  outline: 0;
+  outline: 4px solid var(--accent);
   color: inherit;
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   caret-color: var(--accent);
@@ -3980,7 +3980,7 @@ button:disabled {
 
 .shape-kind-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 5px;
 }
 
@@ -4014,7 +4014,7 @@ button:disabled {
 .shape-kind-grid span {
   overflow: hidden;
   width: 100%;
-  font-size: 7px;
+  font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4572,4 +4572,103 @@ button:disabled {
   .context-bar.focused {
     display: none;
   }
+}
+
+/* Compact, touch-accessible editor menus */
+.editor-menu {
+  position: relative;
+  z-index: 19;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.editor-menu-group { position: relative; }
+.editor-menu-group > button {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+}
+.editor-menu-group > button.active, .editor-menu-group > button:hover { background: var(--surface-hover); }
+.editor-menu-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+.editor-menu-popup button {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+.editor-menu-popup button:hover, .editor-menu-popup button:focus-visible { background: var(--surface-hover); }
+.editor-menu-popup button:disabled { color: var(--text-disabled); }
+.editor-body { height: calc(100dvh - 100px); }
+.import-drop-hint {
+  position: absolute;
+  inset: 8px;
+  z-index: 18;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  color: var(--text-primary);
+  font-weight: 600;
+  pointer-events: none;
+}
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
+  .editor-menu { padding: 0 4px; }
+  .editor-menu-group > button { min-height: 44px; padding: 0 14px; }
+  .editor-body { height: calc(100dvh - 100px - env(safe-area-inset-top)); }
+}
+.save-status.not-saved .status-dot { background: var(--danger); }
+
+/* Grouped shape library, shared across desktop and touch layouts. */
+.shape-library { padding: 16px; }
+.shape-library-intro { margin: 0 0 16px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+.shape-category + .shape-category { margin-top: 24px; }
+.shape-category h3 { margin: 0 0 10px; font-size: 13px; line-height: 20px; color: var(--text-primary); }
+.shape-library .custom-shapes-grid { padding: 0; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
+.shape-library .shapes-grid button { min-height: 82px; height: auto; padding: 10px 5px; }
+.shape-library .shapes-grid button svg { width: 28px; height: 28px; fill: currentColor; }
+.shape-library .shapes-grid button span { font-size: 11px; line-height: 15px; white-space: normal; }
+
+.stamp-options { display: flex; gap: 8px; }
+.stamp-options button {
+  flex: 1;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+.stamp-options button.selected {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-subtle);
 }
