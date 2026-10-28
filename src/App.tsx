@@ -130,7 +130,7 @@ function useMedia(query: string) {
 
 function App() {
   const prefersDark = useMedia('(prefers-color-scheme: dark)')
-  const isPhone = useMedia('(max-width: 599px)')
+  const isCompact = useMedia('(max-width: 599px), (max-height: 560px) and (max-width: 1023px)')
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = localStorage.getItem('pocketboard-theme') as Theme | null
     return stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
@@ -240,6 +240,11 @@ function App() {
     setMobileSheet(null)
   }
 
+  const openArtboardManager = () => {
+    setToast(null)
+    setMobileSheet('artboards')
+  }
+
   const switchArtboard = (id: string) => {
     if (id === activeArtboardId) return
     const target = artboards.find((artboard) => artboard.id === id)
@@ -257,7 +262,10 @@ function App() {
   }
 
   const addArtboard = () => {
-    const nextNumber = artboards.length + 1
+    const nextNumber = artboards.reduce((highest, artboard) => {
+      const match = artboard.name.match(/^Artboard (\d+)$/)
+      return match ? Math.max(highest, Number(match[1])) : highest
+    }, 0) + 1
     const next: ArtboardSnapshot = {
       id: makeId(),
       name: `Artboard ${nextNumber}`,
@@ -280,13 +288,19 @@ function App() {
     showToast(`${next.name} added`)
   }
 
-  const deleteArtboard = () => {
+  const deleteArtboard = (id = activeArtboardId) => {
     if (artboards.length <= 1) {
       showToast('A design needs at least one artboard.')
       return
     }
-    const index = artboards.findIndex((artboard) => artboard.id === activeArtboardId)
-    const remaining = artboards.filter((artboard) => artboard.id !== activeArtboardId)
+    const index = artboards.findIndex((artboard) => artboard.id === id)
+    if (index < 0) return
+    const remaining = artboards.filter((artboard) => artboard.id !== id)
+    if (id !== activeArtboardId) {
+      setArtboards(remaining)
+      showToast('Artboard deleted')
+      return
+    }
     const target = remaining[Math.max(0, index - 1)] || remaining[0]
     setArtboards(remaining)
     setActiveArtboardId(target.id)
@@ -295,6 +309,7 @@ function App() {
     setSelectedId(null)
     setPast([])
     setFuture([])
+    setActiveTool('select')
     showToast('Artboard deleted')
   }
 
@@ -430,8 +445,8 @@ function App() {
     commitLayers([...layersRef.current, base])
     setSelectedId(base.id)
     setActiveTool('select')
-    if (isPhone) setMobileSheet(null)
-  }, [commitLayers, documentMeta.height, documentMeta.width, isPhone])
+    if (isCompact) setMobileSheet(null)
+  }, [commitLayers, documentMeta.height, documentMeta.width, isCompact])
 
   const addDrawnPath = useCallback((rawPoints: Point[], type: 'path' | 'brush', closed = false) => {
     if (rawPoints.length < 2) return
@@ -705,12 +720,14 @@ function App() {
 
         <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''}`} aria-label="Design canvas">
           <ArtboardBar
-            artboards={artboards}
+            artboards={syncedArtboards}
             activeId={activeArtboardId}
             documentMeta={documentMeta}
+            compact={isCompact}
             onSwitch={switchArtboard}
+            onManage={openArtboardManager}
             onAdd={addArtboard}
-            onDelete={deleteArtboard}
+            onDelete={() => deleteArtboard()}
           />
           <Canvas
             artboardRef={artboardRef}
@@ -726,6 +743,7 @@ function App() {
             onSelect={setSelectedId}
             onAddLayer={addLayer}
             onAddPath={addDrawnPath}
+            onOpenArtboards={openArtboardManager}
             onZoom={(delta) => setZoom((value) => clamp(value + delta, 5, 6400))}
             onUpdateGuide={(id, position) => setCanvasGuides((guides) => guides.map((guide) => guide.id === id ? { ...guide, position } : guide))}
             onDeleteGuide={(id) => setCanvasGuides((guides) => guides.filter((guide) => guide.id !== id))}
@@ -741,6 +759,7 @@ function App() {
               selected={selected}
               activeTool={activeTool}
               onOpenProperties={() => setMobileSheet('properties')}
+              onOpenMask={() => setMobileSheet('mask')}
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
               onDoneTool={() => setActiveTool('select')}
@@ -799,7 +818,7 @@ function App() {
       />
 
       {mobileSheet && (
-        <MobileSheetView title={mobileSheet === 'layers' ? 'Layers' : mobileSheet === 'properties' ? 'Properties' : mobileSheet === 'shapes' ? 'Add shape' : 'More'} onClose={() => setMobileSheet(null)}>
+        <MobileSheetView title={mobileSheet === 'layers' ? 'Layers' : mobileSheet === 'properties' ? 'Properties' : mobileSheet === 'shapes' ? 'Add shape' : mobileSheet === 'artboards' ? 'Artboards' : mobileSheet === 'mask' ? 'Crop and mask' : 'More'} onClose={() => setMobileSheet(null)}>
           {mobileSheet === 'layers' && (
             <LayersPanel
               layers={layers}
@@ -847,6 +866,26 @@ function App() {
             />
           )}
           {mobileSheet === 'shapes' && <ShapesGrid onAdd={addLayer} />}
+          {mobileSheet === 'artboards' && (
+            <ArtboardManager
+              artboards={syncedArtboards}
+              activeId={activeArtboardId}
+              onSwitch={(id) => { switchArtboard(id); setMobileSheet(null) }}
+              onAdd={() => { addArtboard(); setMobileSheet(null) }}
+              onDelete={deleteArtboard}
+            />
+          )}
+          {mobileSheet === 'mask' && selected?.type === 'image' && (
+            <MaskPanel
+              layer={selected}
+              onUpdate={(patch) => updateLayer(selected.id, patch)}
+              onMoveImage={() => {
+                if ((selected.imageScale || 1) <= 1) updateLayer(selected.id, { imageScale: 1.15 })
+                setActiveTool('crop')
+                setMobileSheet(null)
+              }}
+            />
+          )}
           {mobileSheet === 'more' && (
             <MoreMenu
               onAction={(action) => {
@@ -854,7 +893,7 @@ function App() {
                 else if (action === 'export') setExportOpen(true)
                 else if (action === 'grid') setGridVisible((visible) => !visible)
                 else if (action === 'rulers') toggleGuides()
-                else if (action === 'artboard') addArtboard()
+                else if (action === 'artboards') { openArtboardManager(); return }
                 else if (action === 'pen' || action === 'brush' || action === 'zoom' || action === 'corner') setActiveTool(action)
                 setMobileSheet(null)
               }}
@@ -1107,6 +1146,7 @@ interface CanvasProps {
   onSelect: (id: string | null) => void
   onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => void
   onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
+  onOpenArtboards: () => void
   onZoom: (delta: number) => void
   onUpdateGuide: (id: string, position: number) => void
   onDeleteGuide: (id: string) => void
@@ -1131,6 +1171,10 @@ function Canvas(props: CanvasProps) {
   const onAddPath = props.onAddPath
   const transformRef = useRef<TransformState | null>(null)
   const layersRef = useRef(props.layers)
+  const longPressTimerRef = useRef<number | null>(null)
+  const longPressStartRef = useRef<{ x: number; y: number } | null>(null)
+  const longPressPointerRef = useRef<number | null>(null)
+  const longPressTriggeredRef = useRef(false)
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
@@ -1345,6 +1389,54 @@ function Canvas(props: CanvasProps) {
     window.addEventListener('pointerup', onUp)
   }
 
+  const startArtboardLongPress = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (event.pointerType !== 'touch' || !['select', 'hand'].includes(props.activeTool)) return
+    longPressStartRef.current = { x: event.clientX, y: event.clientY }
+    longPressPointerRef.current = event.pointerId
+    longPressTriggeredRef.current = false
+    const cleanup = () => {
+      if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current)
+      longPressTimerRef.current = null
+      longPressStartRef.current = null
+      longPressPointerRef.current = null
+      longPressTriggeredRef.current = false
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+    }
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== longPressPointerRef.current) return
+      const start = longPressStartRef.current
+      if (start && Math.hypot(moveEvent.clientX - start.x, moveEvent.clientY - start.y) > 10) cleanup()
+    }
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== longPressPointerRef.current) return
+      const shouldOpen = longPressTriggeredRef.current
+      if (shouldOpen) {
+        upEvent.preventDefault()
+        const transform = transformRef.current
+        if (transform?.moved) {
+          props.onUpdateLive(transform.id, transform.original)
+          transform.moved = false
+        }
+      }
+      cleanup()
+      // Open after release so the touch's synthetic click cannot immediately dismiss the sheet.
+      if (shouldOpen) window.setTimeout(props.onOpenArtboards, 0)
+    }
+    const onCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === longPressPointerRef.current) cleanup()
+    }
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null
+      longPressTriggeredRef.current = true
+      if (navigator.vibrate) navigator.vibrate(12)
+    }, 550)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+  }
+
   const onLayerPointerDown = (event: ReactPointerEvent<SVGGElement>, layer: DesignLayer) => {
     if (props.activeTool === 'select') startTransform(event, layer, 'move')
     else if (props.activeTool === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && (layer.shapeKind === 'regular' || layer.shapeKind === 'diamond')))) {
@@ -1395,10 +1487,12 @@ function Canvas(props: CanvasProps) {
 
   const aspect = props.documentMeta.width / props.documentMeta.height
   const zoomRatio = props.zoom / 68
-  const phoneLayout = viewport.width < 600
-  const sideWidth = viewport.width > 1120 ? 590 : viewport.width > 900 ? 544 : viewport.width >= 600 ? 270 : 0
+  const compactLandscape = viewport.width > viewport.height && viewport.width <= 1023 && viewport.height <= 560
+  const compactLayout = viewport.width < 600 || compactLandscape
+  const sideWidth = compactLayout ? 0 : viewport.width > 1120 ? 590 : viewport.width > 900 ? 544 : 270
   const canvasWidth = viewport.width - sideWidth
-  const fitWidth = Math.max(120, Math.min(510, (viewport.height - (phoneLayout ? 292 : 200)) * aspect, phoneLayout ? viewport.width - 42 : canvasWidth - 96))
+  const compactVerticalSpace = compactLandscape ? 178 : 292
+  const fitWidth = Math.max(120, Math.min(510, (viewport.height - (compactLayout ? compactVerticalSpace : 200)) * aspect, compactLayout ? viewport.width - 42 : canvasWidth - 96))
   const fitHeight = fitWidth / aspect
   return (
     <div className="canvas-scroll">
@@ -1410,7 +1504,8 @@ function Canvas(props: CanvasProps) {
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
           role="img"
-          aria-label={`Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels`}
+          aria-label={`Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          onPointerDownCapture={startArtboardLongPress}
           onPointerDown={onBackgroundPointerDown}
         >
           <rect width={props.documentMeta.width} height={props.documentMeta.height} fill={props.documentMeta.background} data-artboard-background="true" />
@@ -1650,25 +1745,88 @@ function SizePill({ x, y, text }: { x: number; y: number; text: string }) {
   )
 }
 
-function ArtboardBar({ artboards, activeId, documentMeta, onSwitch, onAdd, onDelete }: {
+function ArtboardBar({ artboards, activeId, documentMeta, compact, onSwitch, onManage, onAdd, onDelete }: {
   artboards: ArtboardSnapshot[]
   activeId: string
   documentMeta: DesignDocument
+  compact: boolean
   onSwitch: (id: string) => void
+  onManage: () => void
   onAdd: () => void
   onDelete: () => void
 }) {
+  const pressTimerRef = useRef<number | null>(null)
+  const pressStartRef = useRef<{ x: number; y: number } | null>(null)
+  const pressPointerRef = useRef<number | null>(null)
+  const pressTriggeredRef = useRef(false)
+  const suppressClickRef = useRef(false)
+  const cancelPress = (event?: ReactPointerEvent) => {
+    if (event && pressPointerRef.current !== null && event.pointerId !== pressPointerRef.current) return
+    if (pressTimerRef.current !== null) window.clearTimeout(pressTimerRef.current)
+    pressTimerRef.current = null
+    pressStartRef.current = null
+    pressPointerRef.current = null
+    pressTriggeredRef.current = false
+  }
+  const startPress = (event: ReactPointerEvent, id: string) => {
+    if (!compact || event.pointerType !== 'touch' || id !== activeId) return
+    cancelPress()
+    pressStartRef.current = { x: event.clientX, y: event.clientY }
+    pressPointerRef.current = event.pointerId
+    pressTimerRef.current = window.setTimeout(() => {
+      pressTimerRef.current = null
+      pressTriggeredRef.current = true
+      if (navigator.vibrate) navigator.vibrate(12)
+    }, 500)
+  }
+  const movePress = (event: ReactPointerEvent) => {
+    if (event.pointerId !== pressPointerRef.current) return
+    const start = pressStartRef.current
+    if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) cancelPress(event)
+  }
+  const finishPress = (event: ReactPointerEvent) => {
+    if (event.pointerId !== pressPointerRef.current) return
+    const shouldOpen = pressTriggeredRef.current
+    if (shouldOpen) {
+      event.preventDefault()
+      suppressClickRef.current = true
+    }
+    cancelPress()
+    if (shouldOpen) {
+      window.setTimeout(onManage, 0)
+      window.setTimeout(() => { suppressClickRef.current = false }, 400)
+    }
+  }
+  const selectTab = (id: string) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    if (compact && id === activeId) onManage()
+    else onSwitch(id)
+  }
   return (
     <div className="artboard-bar">
       <div className="artboard-tabs" role="tablist" aria-label="Artboards">
-        {artboards.map((artboard, index) => <button key={artboard.id} role="tab" aria-selected={artboard.id === activeId} className={artboard.id === activeId ? 'active' : ''} onClick={() => onSwitch(artboard.id)}><Frame size={13} /><span>{artboard.name || `Artboard ${index + 1}`}</span></button>)}
+        {artboards.map((artboard, index) => <button
+          key={artboard.id}
+          role="tab"
+          aria-selected={artboard.id === activeId}
+          className={artboard.id === activeId ? 'active' : ''}
+          onPointerDown={(event) => startPress(event, artboard.id)}
+          onPointerMove={movePress}
+          onPointerUp={finishPress}
+          onPointerCancel={cancelPress}
+          onPointerLeave={cancelPress}
+          onClick={() => selectTab(artboard.id)}
+          title={compact && artboard.id === activeId ? 'Open artboards' : `Switch to ${artboard.name}`}
+        ><Frame size={13} /><span>{artboard.name || `Artboard ${index + 1}`}</span>{compact && artboard.id === activeId && <small>{artboards.length}</small>} </button>)}
         <button className="add-artboard-tab" onClick={onAdd} aria-label="Add artboard" title="Add artboard"><Plus size={14} /></button>
       </div>
-      <div className="artboard-bar-meta"><span>{documentMeta.presetName}</span><small>{documentMeta.width} × {documentMeta.height} px</small>{artboards.length > 1 && <button onClick={onDelete} aria-label="Delete current artboard"><Trash2 size={13} /></button>}</div>
+      <div className="artboard-bar-meta"><span>{documentMeta.presetName}</span><small>{documentMeta.width} × {documentMeta.height} px</small>{artboards.length > 1 && <button onClick={onDelete} aria-label="Delete current artboard" title="Delete current artboard"><Trash2 size={13} /></button>}</div>
     </div>
   )
 }
-
 
 function ZoomControl({ zoom, onZoomOut, onZoomIn, onFit }: { zoom: number; onZoomOut: () => void; onZoomIn: () => void; onFit: () => void }) {
   return (
@@ -1682,10 +1840,11 @@ function ZoomControl({ zoom, onZoomOut, onZoomIn, onFit }: { zoom: number; onZoo
   )
 }
 
-function ContextBar({ selected, activeTool, onOpenProperties, onDuplicate, onDelete, onDoneTool, onUpdate }: {
+function ContextBar({ selected, activeTool, onOpenProperties, onOpenMask, onDuplicate, onDelete, onDoneTool, onUpdate }: {
   selected: DesignLayer
   activeTool: Tool
   onOpenProperties: () => void
+  onOpenMask: () => void
   onDuplicate: () => void
   onDelete: () => void
   onDoneTool: () => void
@@ -1696,7 +1855,7 @@ function ContextBar({ selected, activeTool, onOpenProperties, onDuplicate, onDel
     <div className={`context-bar ${focusedMode ? 'focused' : ''}`} aria-label="Selection actions">
       {focusedMode && <button className="context-item context-done" onClick={onDoneTool}><Check size={17} /><span>Done</span></button>}
       <button className="context-item" onClick={onOpenProperties}><SlidersHorizontal size={17} /><span>Edit</span></button>
-      {selected.type === 'image' && <button className="context-item" onClick={onOpenProperties}><Crop size={17} /><span>Crop / mask</span></button>}
+      {selected.type === 'image' && <button className="context-item mask-context-item" onClick={onOpenMask}><Crop size={17} /><span>Crop / mask</span></button>}
       {selected.type !== 'image' && (
         <label className="context-item color-context">
           <span className="mini-swatch" style={{ background: selected.fillType !== 'solid' && selected.gradient ? `linear-gradient(${selected.gradient.angle}deg, ${selected.gradient.stops.map((stop) => stop.color).join(', ')})` : selected.fill }} />
@@ -1779,6 +1938,17 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         <IconButton label="Duplicate" onClick={props.onDuplicate}><Copy /></IconButton>
         <IconButton label={layer.locked ? 'Unlock' : 'Lock'} onClick={() => props.onUpdate({ locked: !layer.locked })}>{layer.locked ? <Lock /> : <Unlock />}</IconButton>
       </div>
+      {layer.type === 'image' && (
+        <div className="quick-image-tools">
+          <button onClick={props.onStartCrop}><Crop size={15} /><span>Move image</span></button>
+          <span>Mask</span>
+          {(['none', 'rounded', 'ellipse', 'star'] as const).map((mask) => {
+            const active = (layer.mask || 'none') === mask
+            const label = mask === 'none' ? 'Rectangle' : mask[0].toUpperCase() + mask.slice(1)
+            return <button key={mask} className={active ? 'active' : ''} onClick={() => props.onUpdate({ mask })} aria-label={`${label} mask`} aria-pressed={active}>{mask === 'none' ? <Square /> : mask === 'rounded' ? <Spline /> : mask === 'ellipse' ? <Circle /> : <Star />}</button>
+          })}
+        </div>
+      )}
       <PropertySection title="Position" actions={<button className={`link-toggle ${linked ? 'active' : ''}`} onClick={() => setLinked(!linked)} aria-label="Lock proportions"><Link2 size={14} /></button>}>
         <div className="dimension-pair">
           <NumberInput label="X" value={round(layer.x)} onChange={(value) => props.onUpdate({ x: value })} />
@@ -2012,14 +2182,127 @@ function MobileToolbar({ activeTool, selected, onSelect, onShapes, onText, onIma
 }
 
 function MobileSheetView({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const dialogRef = useRef<HTMLElement>(null)
+  const onCloseRef = useRef(onClose)
+  useEffect(() => { onCloseRef.current = onClose }, [onClose])
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    dialog?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onCloseRef.current()
+        return
+      }
+      if (event.key !== 'Tab' || !dialog) return
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])')]
+        .filter((element) => element.getClientRects().length > 0)
+      if (!focusable.length) {
+        event.preventDefault()
+        dialog.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!dialog.contains(document.activeElement)) {
+        event.preventDefault()
+        const destination = event.shiftKey ? last : first
+        destination.focus()
+      } else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      if (previousFocus?.isConnected) previousFocus.focus()
+    }
+  }, [])
+  useEffect(() => { dialogRef.current?.focus() }, [title])
   return (
     <div className="sheet-layer" role="presentation">
-      <button className="sheet-scrim" onClick={onClose} aria-label="Close sheet" />
-      <section className="mobile-sheet" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="sheet-handle" />
+      <button className="sheet-scrim" tabIndex={-1} onClick={onClose} aria-label="Close sheet" />
+      <section ref={dialogRef} className="mobile-sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}>
+        <div className="sheet-handle" aria-hidden="true" />
         <header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X /></IconButton></header>
         <div className="sheet-content">{children}</div>
       </section>
+    </div>
+  )
+}
+
+function ArtboardManager({ artboards, activeId, onSwitch, onAdd, onDelete }: {
+  artboards: ArtboardSnapshot[]
+  activeId: string
+  onSwitch: (id: string) => void
+  onAdd: () => void
+  onDelete: (id: string) => void
+}) {
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null)
+  const managerRef = useRef<HTMLDivElement>(null)
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null)
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const pendingArtboard = artboards.find((artboard) => artboard.id === pendingDelete)
+  useEffect(() => { if (pendingDelete) cancelDeleteRef.current?.focus() }, [pendingDelete])
+  const cancelDelete = () => {
+    const trigger = deleteTriggerRef.current
+    setPendingDelete(null)
+    window.setTimeout(() => { if (trigger?.isConnected) trigger.focus() }, 0)
+  }
+  const confirmDelete = (id: string) => {
+    onDelete(id)
+    setPendingDelete(null)
+    window.setTimeout(() => managerRef.current?.querySelector<HTMLElement>('.artboard-row-main[aria-current="true"]')?.focus(), 0)
+  }
+  return (
+    <div ref={managerRef} className="artboard-manager">
+      <p className="sheet-intro">Tap an artboard to switch. Long-press the canvas to open this list.</p>
+      <div className="artboard-manager-list">
+        {artboards.map((artboard, index) => (
+          <div key={artboard.id} className={`artboard-manager-row ${artboard.id === activeId ? 'active' : ''}`}>
+            <button className="artboard-row-main" aria-current={artboard.id === activeId ? 'true' : undefined} onClick={() => onSwitch(artboard.id)}>
+              <span className="artboard-row-preview" style={{ aspectRatio: `${artboard.document.width}/${artboard.document.height}`, background: artboard.document.background }}><Frame size={15} /></span>
+              <span className="artboard-row-copy"><strong>{artboard.name || `Artboard ${index + 1}`}</strong><small>{artboard.document.width} × {artboard.document.height} px · {artboard.layers.length} layer{artboard.layers.length === 1 ? '' : 's'}</small></span>
+              {artboard.id === activeId && <span className="active-artboard-check"><Check size={13} /></span>}
+            </button>
+            <button className="artboard-row-delete" disabled={artboards.length <= 1} onClick={(event) => { deleteTriggerRef.current = event.currentTarget; setPendingDelete(artboard.id) }} aria-label={`Delete ${artboard.name}`} title={artboards.length <= 1 ? 'A design needs at least one artboard' : `Delete ${artboard.name}`}><Trash2 size={17} /></button>
+          </div>
+        ))}
+      </div>
+      <button className="button secondary full-button add-artboard-button" onClick={onAdd}><Plus size={17} /> Add artboard</button>
+      {pendingArtboard && (
+        <div className="artboard-delete-confirm" role="alertdialog" aria-label={`Delete ${pendingArtboard.name}`}>
+          <div><span><Trash2 size={17} /></span><p><strong>Delete {pendingArtboard.name}?</strong><small>Its {pendingArtboard.layers.length} layer{pendingArtboard.layers.length === 1 ? '' : 's'} will be removed.</small></p></div>
+          <div><button ref={cancelDeleteRef} className="button secondary" onClick={cancelDelete}>Cancel</button><button className="button delete-confirm-button" onClick={() => confirmDelete(pendingArtboard.id)}>Delete artboard</button></div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function MaskPanel({ layer, onUpdate, onMoveImage }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void; onMoveImage: () => void }) {
+  const mask = layer.mask || 'none'
+  const masks = [
+    { id: 'none' as const, label: 'Rectangle', icon: <Square /> },
+    { id: 'rounded' as const, label: 'Rounded', icon: <Spline /> },
+    { id: 'ellipse' as const, label: 'Ellipse', icon: <Circle /> },
+    { id: 'star' as const, label: 'Star', icon: <Star /> },
+  ]
+  return (
+    <div className="mask-panel">
+      <div className={`mask-panel-preview mask-${mask}`}><img src={layer.src} alt={`${layer.name} mask preview`} style={{ transform: `translate(${(layer.imageOffsetX || 0) * .08}px, ${(layer.imageOffsetY || 0) * .08}px) scale(${layer.imageScale || 1})` }} /></div>
+      <div className="mask-panel-heading"><h3>Choose a mask</h3><p>The original image stays unchanged.</p></div>
+      <div className="mask-choice-grid">{masks.map((item) => <button key={item.id} className={mask === item.id ? 'active' : ''} onClick={() => onUpdate({ mask: item.id })} aria-pressed={mask === item.id}>{item.icon}<span>{item.label}</span>{mask === item.id && <i><Check size={11} /></i>}</button>)}</div>
+      <SliderField label="Image scale" value={round((layer.imageScale || 1) * 100)} min={100} max={300} unit="%" onChange={(value) => onUpdate({ imageScale: value / 100 })} />
+      <div className="mask-panel-actions">
+        <button className="button primary full-button" onClick={onMoveImage}><Move size={17} /> Move image inside mask</button>
+        {mask !== 'none' && <button className="button secondary full-button" onClick={() => onUpdate({ mask: 'none' })}>Remove mask</button>}
+      </div>
     </div>
   )
 }
@@ -2046,7 +2329,7 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'brush', label: 'Brush tool', icon: <Brush /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
-    { id: 'artboard', label: 'Add artboard', icon: <Frame /> },
+    { id: 'artboards', label: 'Manage artboards', icon: <Frame /> },
     { id: 'grid', label: 'Layout grid', icon: <Grid3X3 /> },
     { id: 'rulers', label: 'Rulers and guides', icon: <Ruler /> },
     { id: 'settings', label: 'Design settings', icon: <Settings2 /> },

@@ -96,5 +96,5 @@ export interface CanvasGuide {
 
 export type View = 'editor' | 'home' | 'new'
 export type Theme = 'light' | 'dark'
-export type MobileSheet = 'layers' | 'properties' | 'shapes' | 'more' | null
+export type MobileSheet = 'layers' | 'properties' | 'shapes' | 'artboards' | 'mask' | 'more' | null
 export type ExportFormat = 'PNG' | 'JPG' | 'SVG' | 'PDF' | 'PROJECT'
