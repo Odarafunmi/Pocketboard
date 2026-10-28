@@ -1462,6 +1462,7 @@ type PendingPinchFocus = {
 function Canvas(props: CanvasProps) {
   const onAddPath = props.onAddPath
   const transformRef = useRef<TransformState | null>(null)
+  const lastTextTapRef = useRef<{ id: string; time: number; x: number; y: number; pointerType: string } | null>(null)
   const transformCleanupRef = useRef<(() => void) | null>(null)
   const maskStrokeCleanupRef = useRef<(() => void) | null>(null)
   const layersRef = useRef(props.layers)
@@ -1607,6 +1608,7 @@ function Canvas(props: CanvasProps) {
     const svg = props.artboardRef.current
     if (!svg) return
 
+    lastTextTapRef.current = null
     transformCleanupRef.current?.()
     maskStrokeCleanupRef.current?.()
     cancelLongPressRef.current?.()
@@ -1747,6 +1749,11 @@ function Canvas(props: CanvasProps) {
           y: originalCenterY + worldShiftY - height / 2,
           width,
           height,
+          ...(original.type === 'text' && original.width > 0 && original.height > 0 ? {
+            fontSize: (original.fontSize || 32) * height / original.height,
+            textScaleX: (original.textScaleX || 1) * (width / original.width) / (height / original.height),
+            ...(original.letterSpacing !== undefined ? { letterSpacing: original.letterSpacing * height / original.height } : {}),
+          } : {}),
         })
       } else if (state.mode === 'rotate') {
         const point = pointerToCanvas(moveEvent.clientX, moveEvent.clientY)
@@ -1773,11 +1780,12 @@ function Canvas(props: CanvasProps) {
       if (finished) return
       finished = true
       const state = transformRef.current
-      let textToEdit: string | null = null
       if (state?.pointerId === pointerId) {
         if (state.moved && commit) props.onCommitSnapshot(state.snapshot)
         else if (state.moved) props.onUpdateLive(state.id, state.original)
-        else if (commit && state.mode === 'move' && state.original.type === 'text') textToEdit = state.id
+        lastTextTapRef.current = commit && !state.moved && state.mode === 'move' && state.original.type === 'text'
+          ? { id: state.id, time: Date.now(), x: state.startClientX, y: state.startClientY, pointerType: event.pointerType }
+          : null
         transformRef.current = null
       }
       setSmartGuides({})
@@ -1788,7 +1796,6 @@ function Canvas(props: CanvasProps) {
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onCancel)
       if (transformCleanupRef.current === cancelTransform) transformCleanupRef.current = null
-      if (textToEdit) beginTextEditingWithFocus(textToEdit)
     }
     function onUp(upEvent: PointerEvent) {
       if (upEvent.pointerId === pointerId) finish(true)
@@ -1952,6 +1959,16 @@ function Canvas(props: CanvasProps) {
   }
 
   const onLayerPointerDown = (event: ReactPointerEvent<SVGGElement>, layer: DesignLayer) => {
+    if (props.activeTool === 'select' && layer.type === 'text' && !layer.locked && !pinchRef.current && (event.pointerType !== 'touch' || touchPointersRef.current.size === 1)) {
+      const previous = lastTextTapRef.current
+      if (previous && previous.pointerType === event.pointerType && previous.id === layer.id && Date.now() - previous.time < 400 && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 30) {
+        lastTextTapRef.current = null
+        event.stopPropagation()
+        event.preventDefault()
+        beginTextEditingWithFocus(layer.id)
+        return
+      }
+    }
     if (props.activeTool === 'select') startTransform(event, layer, 'move')
     else if (props.activeTool === 'object-select') {
       event.stopPropagation()
@@ -1973,6 +1990,7 @@ function Canvas(props: CanvasProps) {
   }
 
   const onBackgroundPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
+    lastTextTapRef.current = null
     if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) {
       event.preventDefault()
       return
@@ -2194,7 +2212,7 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
     content = (
-      <text {...common} x={x} y={layer.y + fontSize * 0.84} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
+      <text {...common} x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
         {lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{line}</tspan>)}
       </text>
     )
@@ -2253,6 +2271,9 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
             letterSpacing: `${layer.letterSpacing || 0}px`,
             lineHeight: layer.lineHeight || 1.2,
             textAlign: layer.textAlign || 'left',
+            width: `${100 / (layer.textScaleX || 1)}%`,
+            transform: `scaleX(${layer.textScaleX || 1})`,
+            transformOrigin: 'left top',
           }}
           onChange={(event) => updateValue(event.target.value)}
           onPointerDown={(event) => {
@@ -3313,7 +3334,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return wrap(`<text x="${x}" y="${layer.y + fontSize * 0.84}" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${(layer.text || '').split('\n').map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
+    return wrap(`<text x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${(layer.text || '').split('\n').map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
 }
