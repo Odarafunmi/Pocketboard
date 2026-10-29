@@ -4774,3 +4774,8 @@ button:disabled {
 .case-controls .button { flex: 1; min-width: 0; padding-inline: 6px; }
 .export-error { margin: 0 16px 8px; color: var(--danger); }
 .font-picker > .font-search { margin-bottom: 8px; }
+
+.text-format-controls, .stroke-type-control { width: 100%; }
+.text-format-controls button, .stroke-type-control button { flex: 1; min-height: 40px; }
+.no-fill-note { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.no-fill-swatch { background: linear-gradient(135deg, transparent 44%, var(--danger) 46%, var(--danger) 54%, transparent 56%), repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 50% / 8px 8px; }

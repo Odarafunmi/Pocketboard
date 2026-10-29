@@ -12,6 +12,7 @@ import {
   ArrowLeft,
   ArrowUp,
   Brush,
+  Bold,
   Check,
   ChevronDown,
   ChevronRight,
@@ -32,6 +33,7 @@ import {
   Heart,
   Hexagon,
   Image as ImageIcon,
+  Italic,
   Layers3,
   LassoSelect,
   LayoutGrid,
@@ -67,6 +69,7 @@ import {
   Trash2,
   Type,
   Undo2,
+  Underline,
   Unlock,
   Upload,
   WandSparkles,
@@ -147,6 +150,18 @@ const round = (value: number) => Math.round(value)
 const makeId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 const closestEventElement = (target: EventTarget | null, selector: string) => target instanceof Element ? target.closest(selector) : null
 const isTextEditorTarget = (target: EventTarget | null) => Boolean(closestEventElement(target, '.text-editor-overlay'))
+
+// Round and regular radial shapes start with equal axes. Other shapes retain
+// their own aspect ratio, including intentionally rectangular presets.
+function needsEqualAxes(layer: DesignLayer) {
+  return layer.type === 'ellipse' || layer.type === 'star' || (layer.type === 'polygon' && ['regular', 'diamond', 'starburst', 'sunburst'].includes(layer.shapeKind || 'regular'))
+}
+
+function equalAxisBounds(layer: DesignLayer): DesignLayer {
+  const size = Math.max(layer.width, layer.height)
+  if (!Number.isFinite(size) || size <= 0) return layer
+  return { ...layer, x: layer.x + (layer.width - size) / 2, y: layer.y + (layer.height - size) / 2, width: size, height: size }
+}
 
 function useMedia(query: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches)
@@ -540,6 +555,23 @@ function App() {
     setEditingTextId(null)
   }, [])
 
+  // Selecting a different circle or regular radial shape restores equal axes.
+  // Record the adjustment so Undo can restore the previous dimensions.
+  const selectObject = (id: string | null): DesignLayer | null => {
+    if (id !== editingTextId) finishTextEditing()
+    const previousId = selectedIdRef.current
+    selectedIdRef.current = id
+    setSelectedId(id)
+    if (!id) return null
+    const current = layersRef.current
+    const layer = current.find((item) => item.id === id)
+    if (!layer || layer.locked || previousId === id || !needsEqualAxes(layer) || Math.abs(layer.width - layer.height) < 0.000001) return layer || null
+    const squared = equalAxisBounds(layer)
+    if (squared === layer) return layer
+    commitLayers(current.map((item) => item.id === id ? squared : item))
+    return squared
+  }
+
   const addMaskStroke = useCallback((id: string, stroke: MaskBrushStroke) => {
     const current = layersRef.current
     const target = current.find((layer) => layer.id === id)
@@ -722,11 +754,12 @@ function App() {
       lineHeight: type === 'text' ? 1.1 : undefined,
       ...preset,
     }
-    commitLayers([...layersRef.current, base])
-    setSelectedId(base.id)
+    const created = needsEqualAxes(base) ? equalAxisBounds(base) : base
+    commitLayers([...layersRef.current, created])
+    setSelectedId(created.id)
     setActiveTool('select')
     if (isCompact) setMobileSheet(null)
-    return base.id
+    return created.id
   }, [commitLayers, documentMeta.height, documentMeta.width, isCompact])
 
   const addDrawnPath = useCallback((rawPoints: Point[], type: 'path' | 'brush', closed = false) => {
@@ -1078,7 +1111,7 @@ function App() {
           <LayersPanel
             layers={layers}
             selectedId={selectedId}
-            onSelect={setSelectedId}
+            onSelect={selectObject}
             onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
             onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
             onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
@@ -1139,9 +1172,9 @@ function App() {
             pickingColor={Boolean(colorPick)}
             onPickColor={pickCanvasColor}
             onSelect={(id) => {
-              if (id !== editingTextId) finishTextEditing()
-              setSelectedId(id)
+              const layer = selectObject(id)
               if (id === null && ['object-select', 'corner', 'crop', 'brush'].includes(activeTool)) setActiveTool('select')
+              return layer
             }}
             onAddLayer={addLayer}
             onAddPath={addDrawnPath}
@@ -1239,7 +1272,7 @@ function App() {
             <LayersPanel
               layers={layers}
               selectedId={selectedId}
-              onSelect={(id) => { setSelectedId(id); setMobileSheet(null) }}
+              onSelect={(id) => { selectObject(id); setMobileSheet(null) }}
               onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
               onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
               onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
@@ -1745,7 +1778,7 @@ function LayerThumbnail({ layer }: { layer: DesignLayer }) {
   if (layer.type === 'path') return <span className="layer-thumbnail icon"><PenTool size={15} /></span>
   if (layer.type === 'brush') return <span className="layer-thumbnail icon"><Brush size={15} /></span>
   if (layer.type === 'line') return <span className="layer-thumbnail icon"><Minus size={15} /></span>
-  return <span className="layer-thumbnail color" style={{ background: layer.fill }} />
+  return <span className={`layer-thumbnail color ${layer.fillType === 'none' ? 'no-fill-swatch' : ''}`} style={{ background: layer.fillType === 'none' ? undefined : layer.fill }} />
 }
 
 interface CanvasProps {
@@ -1774,7 +1807,7 @@ interface CanvasProps {
   onFinishSelection: () => void
   pickingColor: boolean
   onPickColor: (point: Point) => void
-  onSelect: (id: string | null) => void
+  onSelect: (id: string | null) => DesignLayer | null
   onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => string
   onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
   onAddMaskStroke: (id: string, stroke: MaskBrushStroke) => void
@@ -2174,13 +2207,16 @@ function Canvas(props: CanvasProps) {
     event.stopPropagation()
     event.preventDefault()
     transformCleanupRef.current?.()
-    props.onSelect(layer.id)
+    const selectedLayer = props.onSelect(layer.id) || layer
+    // Selection may have changed the bounds. Use those bounds for the entire
+    // gesture, including cancellation and the transform's undo snapshot.
+    layersRef.current = layersRef.current.map((item) => item.id === selectedLayer.id ? selectedLayer : item)
     const pointerId = event.pointerId
     const captureTarget = event.currentTarget as Element
     try { captureTarget.setPointerCapture(pointerId) } catch { /* window listeners remain as a fallback */ }
     transformRef.current = {
       mode, id: layer.id, pointerId, startClientX: event.clientX, startClientY: event.clientY,
-      original: { ...layer }, snapshot: cloneLayers(layersRef.current), handle, moved: false,
+      original: { ...selectedLayer }, snapshot: cloneLayers(layersRef.current), handle, moved: false,
     }
 
     const onMove = (moveEvent: PointerEvent) => {
@@ -2677,7 +2713,7 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
   const mask = layer.mask || 'none'
   return (
     <>
-      {layer.fillType && layer.fillType !== 'solid' && layer.gradient && (
+      {(layer.fillType === 'linear' || layer.fillType === 'radial') && layer.gradient && (
         layer.gradient.type === 'linear'
           ? <linearGradient id={`gradient-${layer.id}`} x1="0" y1="0.5" x2="1" y2="0.5" gradientTransform={`rotate(${layer.gradient.angle} .5 .5)`}>{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} />)}</linearGradient>
           : <radialGradient id={`gradient-${layer.id}`} cx="50%" cy="50%" r="70%">{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} />)}</radialGradient>
@@ -2712,7 +2748,11 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
 }
 
 function layerFill(layer: DesignLayer) {
-  return layer.fillType && layer.fillType !== 'solid' && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
+  return layer.fillType === 'none' ? 'none' : (layer.fillType === 'linear' || layer.fillType === 'radial') && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
+}
+
+function layerStroke(layer: DesignLayer) {
+  return layer.strokeEnabled === false ? 'none' : layer.stroke
 }
 
 function maskStrokePoints(layer: DesignLayer, stroke: MaskBrushStroke) {
@@ -2773,15 +2813,15 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
   const cx = layer.x + layer.width / 2
   const cy = layer.y + layer.height / 2
   const transform = layerTransform(layer)
-  const common = { opacity: editing ? 0 : layer.opacity, 'data-layer': layer.id }
+  const common = { opacity: editing ? 0 : layer.opacity, 'data-layer': layer.id, pointerEvents: (layer.fillType === 'none' || layer.strokeEnabled === false ? 'all' : undefined) as 'all' | undefined }
   const fill = layerFill(layer)
   let content: ReactNode
   if (layer.type === 'rectangle') {
-    content = <rect {...common} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.radius || 0} fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} />
+    content = <rect {...common} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.radius || 0} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'ellipse') {
-    content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} />
+    content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'polygon') {
-    content = <path {...common} d={polygonLayerPath(layer)} fillRule="evenodd" fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} strokeLinejoin="round" />
+    content = <path {...common} d={polygonLayerPath(layer)} fillRule="evenodd" fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeLinejoin="round" />
   } else if (layer.type === 'image') {
     const scale = layer.imageScale || 1
     const imageWidth = layer.width * scale
@@ -2790,19 +2830,19 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
     const imageY = layer.y - (imageHeight - layer.height) / 2 + (layer.imageOffsetY || 0)
     content = <image {...common} href={layer.src} x={imageX} y={imageY} width={imageWidth} height={imageHeight} preserveAspectRatio="xMidYMid slice" clipPath={`url(#clip-${layer.id})`} />
   } else if (layer.type === 'line') {
-    content = <line {...common} x1={layer.x} y1={layer.y} x2={layer.x + layer.width} y2={layer.y + layer.height} stroke={layer.stroke} strokeWidth={Math.max(layer.strokeWidth, 2)} strokeLinecap="round" />
+    content = <line {...common} x1={layer.x} y1={layer.y} x2={layer.x + layer.width} y2={layer.y + layer.height} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 2)} strokeLinecap="round" />
   } else if (layer.type === 'star') {
-    content = <polygon {...common} points={starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} fill={fill} stroke={layer.stroke} strokeWidth={layer.strokeWidth} />
+    content = <polygon {...common} points={starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'path' || layer.type === 'brush') {
     const points = layerPoints(layer)
-    content = <path {...common} d={layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))} fill={layer.closed ? fill : 'none'} stroke={layer.stroke} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
+    content = <path {...common} d={layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))} fill={layer.closed ? fill : 'none'} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
   } else {
     const lines = textLines(layer)
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
     content = (
-      <text {...common} xmlSpace="preserve" x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
+      <text {...common} xmlSpace="preserve" x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} fontStyle={layer.fontStyle || 'normal'} textDecoration={layer.underline ? 'underline' : 'none'} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
         {lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{line}</tspan>)}
       </text>
     )
@@ -2860,6 +2900,8 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
             fontFamily: layer.fontFamily || 'Inter',
             fontSize: `${fontSize}px`,
             fontWeight: layer.fontWeight || 400,
+            fontStyle: layer.fontStyle || 'normal',
+            textDecoration: layer.underline ? 'underline' : 'none',
             letterSpacing: `${layer.letterSpacing || 0}px`,
             lineHeight: layer.lineHeight || 1.2,
             textAlign: layer.textAlign || 'left',
@@ -3197,7 +3239,7 @@ function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpen
       </>}
       {selected.type !== 'image' && (
         <label className="context-item color-context">
-          <span className="mini-swatch" style={{ background: selected.fillType !== 'solid' && selected.gradient ? `linear-gradient(${selected.gradient.angle}deg, ${selected.gradient.stops.map((stop) => stop.color).join(', ')})` : selected.fill }} />
+          <span className={`mini-swatch ${selected.fillType === 'none' ? 'no-fill-swatch' : ''}`} style={{ background: (selected.fillType === 'linear' || selected.fillType === 'radial') && selected.gradient ? `linear-gradient(${selected.gradient.angle}deg, ${selected.gradient.stops.map((stop) => stop.color).join(', ')})` : selected.fillType === 'none' ? undefined : selected.fill }} />
           <span>Fill</span>
           <input type="color" value={normalizeColor(selected.fill)} onChange={(event) => onUpdate({ fill: event.target.value, fillType: 'solid' })} aria-label="Fill colour" />
         </label>
@@ -3385,6 +3427,19 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       {layer.type === 'text' && (
         <PropertySection title="Typography">
+          <div className="segmented text-format-controls" role="group" aria-label="Text formatting">
+            <button type="button" className={(layer.fontWeight || 400) >= 700 ? 'selected' : ''} aria-label="Bold" aria-pressed={(layer.fontWeight || 400) >= 700} onClick={() => {
+              const fontWeight = (layer.fontWeight || 400) >= 700 ? 400 : 700
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontWeight }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              props.onUpdate({ fontWeight, height })
+            }}><Bold /></button>
+            <button type="button" className={layer.fontStyle === 'italic' ? 'selected' : ''} aria-label="Italic" aria-pressed={layer.fontStyle === 'italic'} onClick={() => {
+              const fontStyle = layer.fontStyle === 'italic' ? 'normal' : 'italic'
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontStyle }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              props.onUpdate({ fontStyle, height })
+            }}><Italic /></button>
+            <button type="button" className={layer.underline ? 'selected' : ''} aria-label="Underline" aria-pressed={Boolean(layer.underline)} onClick={() => props.onUpdate({ underline: !layer.underline })}><Underline /></button>
+          </div>
           <FontPicker key={layer.id} layer={layer} onUpdate={props.onUpdate} />
           <div className="case-controls" aria-label="Change text case">
             {(['uppercase', 'lowercase'] as const).map((mode) => <button key={mode} type="button" className="button secondary" onClick={() => {
@@ -3434,8 +3489,12 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       {(['rectangle', 'ellipse', 'polygon', 'star', 'line', 'path', 'brush'] as LayerType[]).includes(layer.type) && (
         <PropertySection title={layer.type === 'brush' ? 'Brush' : 'Stroke'} optional={layer.type !== 'brush'}>
-          <ColorInput onPickColor={props.onPickColor} label="Stroke" value={layer.stroke === 'transparent' ? '#18181B' : layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeWidth: layer.strokeWidth || 1 })} />
-          {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeWidth: layer.strokeWidth || 1 })} /></>}
+          <div className="segmented stroke-type-control" role="group" aria-label="Stroke colour">
+            <button type="button" aria-label="No stroke" aria-pressed={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none'} className={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none' ? 'selected' : ''} onClick={() => props.onUpdate({ strokeEnabled: false })}>None</button>
+            <button type="button" aria-label="Solid stroke" aria-pressed={layer.strokeEnabled !== false && layer.stroke !== 'transparent' && layer.stroke !== 'none'} className={layer.strokeEnabled !== false && layer.stroke !== 'transparent' && layer.stroke !== 'none' ? 'selected' : ''} onClick={() => props.onUpdate({ strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 })}>Solid</button>
+          </div>
+          <ColorInput onPickColor={props.onPickColor} label="Stroke" value={layer.stroke === 'transparent' ? '#18181B' : layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} />
+          {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} /></>}
           {layer.type === 'brush'
             ? <><SliderField label="Brush size" value={layer.strokeWidth} min={1} max={120} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} /><SliderField label="Smoothing" value={round((layer.smoothing || .5) * 100)} min={0} max={100} unit="%" onChange={(value) => props.onUpdate({ smoothing: value / 100 })} /></>
             : <NumberInput label="Width" value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} />}
@@ -3564,8 +3623,8 @@ function NumberInput({ label, value, unit, step = 1, onChange }: { label: ReactN
 function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void; onPickColor: (apply: (color: string) => void) => void; imagePalette: { name: string; colors: string[] } | null }) {
   const fillType = layer.fillType || 'solid'
   const gradient = layer.gradient || { ...DEFAULT_GRADIENT, stops: DEFAULT_GRADIENT.stops.map((stop) => ({ ...stop })) }
-  const setFillType = (type: 'solid' | 'linear' | 'radial') => {
-    if (type === 'solid') onUpdate({ fillType: 'solid' })
+  const setFillType = (type: 'none' | 'solid' | 'linear' | 'radial') => {
+    if (type === 'solid' || type === 'none') onUpdate({ fillType: type })
     else onUpdate({ fillType: type, gradient: { ...gradient, type } })
   }
   const setStop = (index: number, color: string) => {
@@ -3574,24 +3633,24 @@ function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: Des
   return (
     <div className="fill-editor">
       <div className="segmented fill-type-control" aria-label="Fill type">
-        {(['solid', 'linear', 'radial'] as const).map((type) => <button key={type} className={fillType === type ? 'selected' : ''} onClick={() => setFillType(type)}>{type === 'solid' ? 'Solid' : type === 'linear' ? 'Linear' : 'Radial'}</button>)}
+        {(['none', 'solid', 'linear', 'radial'] as const).map((type) => <button key={type} className={fillType === type ? 'selected' : ''} aria-pressed={fillType === type} aria-label={type === 'none' ? 'No fill' : `${type[0].toUpperCase()}${type.slice(1)} fill`} onClick={() => setFillType(type)}>{type === 'none' ? 'None' : type === 'solid' ? 'Solid' : type === 'linear' ? 'Linear' : 'Radial'}</button>)}
       </div>
-      {fillType === 'solid'
+      {fillType === 'none' ? <p className="no-fill-note">No fill. Choose a colour to restore it.</p> : fillType === 'solid'
         ? <ColorInput onPickColor={onPickColor} label="Fill" value={layer.fill} onChange={(fill) => onUpdate({ fill, fillType: 'solid' })} />
         : <>
           <div className="gradient-preview" style={{ background: gradient.type === 'radial' ? `radial-gradient(circle, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` : `linear-gradient(${gradient.angle}deg, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` }} />
           <div className="gradient-stops">{gradient.stops.map((stop, index) => <div key={index}><ColorInput onPickColor={onPickColor} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} />{imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={stop.color} onChange={(color) => setStop(index, color)} /></>}</div>)}</div>
           {gradient.type === 'linear' && <SliderField label="Angle" value={gradient.angle} min={0} max={360} unit="°" onChange={(angle) => onUpdate({ gradient: { ...gradient, angle } })} />}
         </>}
-      {imagePalette && fillType === 'solid' && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={layer.fill} onChange={(color) => onUpdate({ fill: color })} /></>}
+      {imagePalette && (fillType === 'solid' || fillType === 'none') && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={fillType === 'none' ? '' : layer.fill} onChange={(color) => onUpdate({ fill: color, fillType: 'solid' })} /></>}
       <div className="palette-heading"><span>Document colours</span></div>
-      <ColourPalette value={fillType === 'solid' ? layer.fill : gradient.stops[0].color} onChange={(color) => fillType === 'solid' ? onUpdate({ fill: color }) : setStop(0, color)} />
+      <ColourPalette value={fillType === 'none' ? '' : fillType === 'solid' ? layer.fill : gradient.stops[0].color} onChange={(color) => fillType === 'solid' || fillType === 'none' ? onUpdate({ fill: color, fillType: 'solid' }) : setStop(0, color)} />
     </div>
   )
 }
 
 function ColourPalette({ value, onChange, colors = DOCUMENT_COLOURS }: { value: string; onChange: (colour: string) => void; colors?: string[] }) {
-  return <div className="colour-palette">{colors.map((colour) => <button key={colour} className={normalizeColor(value).toLowerCase() === colour.toLowerCase() ? 'selected' : ''} style={{ background: colour }} onClick={() => onChange(colour)} aria-label={`Use ${colour}`}>{normalizeColor(value).toLowerCase() === colour.toLowerCase() && <Check size={11} />}</button>)}</div>
+  return <div className="colour-palette">{colors.map((colour) => <button key={colour} className={value && normalizeColor(value).toLowerCase() === colour.toLowerCase() ? 'selected' : ''} style={{ background: colour }} onClick={() => onChange(colour)} aria-label={`Use ${colour}`}>{value && normalizeColor(value).toLowerCase() === colour.toLowerCase() && <Check size={11} />}</button>)}</div>
 }
 
 function ImagePalettePreview({ palette }: { palette: { name: string; colors: string[] } }) {
@@ -4207,7 +4266,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const bounds = gaussianBounds(layer)
       definition += `<filter id="blur-${layer.id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="${layer.blur.amount}"/></filter>`
     }
-    if (layer.fillType && layer.fillType !== 'solid' && layer.gradient) {
+    if ((layer.fillType === 'linear' || layer.fillType === 'radial') && layer.gradient) {
       const stops = layer.gradient.stops.map((stop) => `<stop offset="${stop.offset * 100}%" stop-color="${stop.color}"/>`).join('')
       definition += layer.gradient.type === 'linear'
         ? `<linearGradient id="gradient-${layer.id}" x1="0" y1="0.5" x2="1" y2="0.5" gradientTransform="rotate(${layer.gradient.angle} .5 .5)">${stops}</linearGradient>`
@@ -4235,16 +4294,17 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const cy = layer.y + layer.height / 2
     const transform = layerTransform(layer)
     const opacity = layer.opacity
-    const fill = layer.fillType && layer.fillType !== 'solid' && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
+    const fill = layerFill(layer)
+    const stroke = layerStroke(layer)
     const wrap = (element: string) => {
       const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
       const samples = blurSamples(layer)
       const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
       return `<g style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
     }
-    if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
-    if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
-    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
+    if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
     if (layer.type === 'image') {
       const scale = layer.imageScale || 1
       const width = layer.width * scale
@@ -4253,17 +4313,17 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const y = layer.y - (height - layer.height) / 2 + (layer.imageOffsetY || 0)
       return wrap(`<image href="${escapeXml(layer.src || '')}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice" clip-path="url(#clip-${layer.id})" opacity="${opacity}"/>`)
     }
-    if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}"/>`)
-    if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}"/>`)
+    if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'path' || layer.type === 'brush') {
       const points = layerPoints(layer)
       const data = layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))
-      return wrap(`<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${layer.stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
+      return wrap(`<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
     }
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLines(layer).map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
+    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLines(layer).map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
 }
