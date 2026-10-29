@@ -14,6 +14,8 @@ export type Tool =
   | 'corner'
   | 'zoom'
   | 'crop'
+  | 'polygon-mask'
+  | 'wand-mask'
 
 export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
 
@@ -47,6 +49,11 @@ export interface MaskBrushStroke {
   size: number
   mode: MaskBrushMode
 }
+
+export type BlurType = 'gaussian' | 'motion' | 'radial' | 'path'
+export interface LayerBlur { type: BlurType; amount: number; angle: number; curvature: number; enabled: boolean }
+
+export type MaskSelection = { mode: 'keep' | 'hide'; feather: number } & ({ kind: 'polygon'; points: Point[] } | { kind: 'wand'; image: string })
 
 export interface DesignLayer {
   id: string
@@ -87,8 +94,10 @@ export interface DesignLayer {
   imageOffsetY?: number
   imageScale?: number
   maskStrokes?: MaskBrushStroke[]
+  maskSelections?: MaskSelection[]
   flipX?: boolean
   flipY?: boolean
+  blur?: LayerBlur
   blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay'
 }
 
@@ -116,5 +125,5 @@ export interface CanvasGuide {
 
 export type View = 'editor' | 'home' | 'new'
 export type Theme = 'light' | 'dark'
-export type MobileSheet = 'layers' | 'properties' | 'shapes' | 'artboards' | 'mask' | 'more' | null
+export type MobileSheet = 'layers' | 'properties' | 'shapes' | 'artboards' | 'mask' | 'more' | 'mouse' | null
 export type ExportFormat = 'PNG' | 'JPG' | 'SVG' | 'PDF' | 'PROJECT'
