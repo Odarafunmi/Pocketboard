@@ -4731,3 +4731,25 @@ button:disabled {
   .save-button { width: 40px; min-width: 40px; height: 40px; padding: 0; }
   .save-button span { display: none; }
 }
+
+/* Mouse preferences and the accessible, touch-friendly colour wheel. */
+.mouse-settings { display: grid; gap: 16px; padding: 16px; }
+.mouse-settings p { margin: 0; color: var(--text-secondary, #71717a); line-height: 1.5; }
+.mouse-settings label { display: grid; gap: 6px; }
+.mouse-settings select { min-height: 40px; width: 100%; padding: 0 10px; border: 1px solid var(--border, #d4d4d8); border-radius: 8px; background: var(--surface, #fff); color: inherit; }
+.mouse-settings .button { justify-self: start; }
+.color-control { min-width: 0; }
+.custom-colour-picker { display: grid; gap: 8px; padding: 12px 4px; }
+.colour-wheel { position: relative; width: min(180px, 100%); aspect-ratio: 1; margin: 0 auto 4px; border-radius: 50%; background: radial-gradient(circle, white, transparent), conic-gradient(from 90deg, red, yellow, lime, cyan, blue, magenta, red); touch-action: none; cursor: crosshair; }
+.colour-wheel-shade { position: absolute; inset: 0; background: black; border-radius: inherit; pointer-events: none; }
+.colour-wheel-marker { position: absolute; width: 14px; height: 14px; border: 2px solid white; border-radius: 50%; box-shadow: 0 0 0 1px #222; transform: translate(-50%, -50%); pointer-events: none; }
+.custom-colour-picker label { display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 8px; }
+.custom-colour-picker input { width: 100%; }
+.blur-select { display: grid; gap: 6px; margin-bottom: 10px; }
+.blur-select select { min-height: 40px; padding: 0 10px; color: var(--text-primary); background: var(--surface-input); border: 1px solid var(--border-strong); border-radius: 8px; }
+.selection-tool-controls { position: absolute; z-index: 20; left: 50%; bottom: 68px; transform: translateX(-50%); display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; max-width: calc(100% - 24px); padding: 10px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); box-shadow: 0 4px 20px #0002; }
+.selection-tool-controls label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.selection-tool-controls input, .selection-tool-controls select { min-height: 36px; color: var(--text-primary); background: var(--surface-input); border: 1px solid var(--border-strong); border-radius: 6px; padding: 4px 6px; }
+.selection-tool-controls input { width: 56px; }
+.selection-tool-controls .button { min-height: 36px; white-space: nowrap; }
+@media (max-width: 1023px) { .selection-tool-controls { bottom: 78px; width: calc(100% - 24px); } }

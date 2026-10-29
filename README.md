@@ -32,7 +32,9 @@ npm run preview
 - Non-destructive image repositioning, scaling, and rectangle, rounded, ellipse, or star masks, with a dedicated compact-screen workflow
 - Artboard alignment controls, snapping smart guides, draggable ruler guides, and adjustable layout grids
 - Multiple artboards with switching, adding, deleting, local persistence, project-file backup, and a touch-first manager available by tap or long-press
-- Dedicated zoom tool, controls, and two-finger workspace pinch zoom from 5% to 6400%
+- Dedicated zoom tool, controls, two-finger workspace pinch, and pointer-centred mouse-wheel zoom from 5% to 6400%
+- Middle-button drag pans the canvas. Mouse actions can be changed or reset under View → Mouse settings (or More → Mouse settings on mobile).
+- Custom colour wheel with keyboard-adjustable hue, saturation and brightness, alongside the native picker and canvas eyedropper.
 - Contextual properties for typography, fills, strokes, position, opacity, and artboard settings
 - Undo/redo, keyboard shortcuts, local auto-save plus an explicit Save action, light/dark themes, and reduced-motion support
 - Home and New design screens with project cards, presets, print units, and custom dimensions
@@ -46,3 +48,7 @@ Imported images are stored in the browser and may be limited by device storage. 
 To sample a colour, use the picker beside a fill, gradient stop, stroke or background field, then tap the artboard. Press Escape or choose Cancel to exit. When focused, use arrow keys and Enter to sample with a keyboard. The picker samples the rendered artboard, not editor controls or the surrounding screen.
 
 Select an image and choose Extract palette from image (or Palette on mobile) to generate up to six colours from the original image. The palette stays on this device and is available in fill, gradient-stop, stroke, and background controls. Save writes the current design to this browser; export a project file for a portable backup.
+
+For a selection mask, select an unlocked image and choose Polygonal selection or Magic wand selection in its properties (on a phone, open Mask shape). Choose whether to keep or hide the selected region and set feathering before applying it. The polygon tool places vertices with taps and uses Apply selection; the wand selects a contiguous region of similar colour using the chosen tolerance. The wand samples the displayed image crop, at up to 1024 pixels on its longest side; it is not an AI object detector. Selection masks remain editable through undo, clearing and the hide/restore mask brush. Large image masks can consume local storage.
+
+Blur is available in the selected layer's properties for shapes, text and images. Gaussian uses the browser's SVG filter. Motion, radial zoom and curved-path blurs use locally rendered exposure samples; the path is controlled by angle and curvature rather than a drawn path. The layer list toggles each blur without removing its settings. Exports and colour sampling use the same rendering; SVG viewers must support the `plus-lighter` blend mode for sampled blurs, so use PNG if a viewer does not support it. No new image-processing dependency is required.

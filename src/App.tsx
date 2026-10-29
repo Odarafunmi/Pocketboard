@@ -89,9 +89,11 @@ import { flushSync } from 'react-dom'
 import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './data'
 import { textLines } from './textLayout'
 import { extractImagePalette } from './imagePalette'
+import { magicWandMask } from './selectionMask'
 import { presetShapePath, shapeCategories } from './shapePresets'
 import type {
   ArtboardSnapshot,
+  BlurType,
   CanvasGuide,
   DesignDocument,
   DesignLayer,
@@ -100,12 +102,24 @@ import type {
   LayerType,
   MaskBrushMode,
   MaskBrushStroke,
+  MaskSelection,
   MobileSheet,
   Point,
   Theme,
   Tool,
   View,
 } from './types'
+
+type MouseButtonAction = 'default' | 'pan' | 'none'
+type MouseSettings = { left: MouseButtonAction; middle: MouseButtonAction; right: MouseButtonAction; wheel: 'zoom' | 'pan' | 'none' }
+const DEFAULT_MOUSE: MouseSettings = { left: 'default', middle: 'pan', right: 'default', wheel: 'zoom' }
+function readMouseSettings(): MouseSettings {
+  try {
+    const saved = JSON.parse(localStorage.getItem('pocketboard-mouse-settings') || '{}')
+    const button = (value: unknown, fallback: MouseButtonAction): MouseButtonAction => value === 'default' || value === 'pan' || value === 'none' ? value : fallback
+    return { left: button(saved.left, 'default'), middle: button(saved.middle, 'pan'), right: button(saved.right, 'default'), wheel: saved.wheel === 'zoom' || saved.wheel === 'pan' || saved.wheel === 'none' ? saved.wheel : 'zoom' }
+  } catch { return { ...DEFAULT_MOUSE } }
+}
 
 const ACCENT = '#5B4BF0'
 const GUIDE_COLOR = '#FF2D87'
@@ -121,6 +135,7 @@ const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
   maskStrokes: layer.maskStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
+  maskSelections: layer.maskSelections?.map((selection) => selection.kind === 'polygon' ? { ...selection, points: selection.points.map((point) => ({ ...point })) } : { ...selection }),
   gradient: layer.gradient ? { ...layer.gradient, stops: layer.gradient.stops.map((stop) => ({ ...stop })) } : undefined,
 }))
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
@@ -178,6 +193,9 @@ function App() {
   const [editingTextId, setEditingTextId] = useState<string | null>(null)
   const [maskBrushMode, setMaskBrushMode] = useState<MaskBrushMode>('hide')
   const [maskBrushSize, setMaskBrushSize] = useState(72)
+  const [selectionMode, setSelectionMode] = useState<'keep' | 'hide'>('keep')
+  const [selectionTolerance, setSelectionTolerance] = useState(32)
+  const [selectionFeather, setSelectionFeather] = useState(0)
   const [artboards, setArtboards] = useState<ArtboardSnapshot[]>(() => {
     try {
       const stored = localStorage.getItem('pocketboard-artboards')
@@ -197,6 +215,11 @@ function App() {
   const [future, setFuture] = useState<DesignLayer[][]>([])
   const [zoom, setZoom] = useState(68)
   const [mobileSheet, setMobileSheet] = useState<MobileSheet>(null)
+  const [mouseSettings, setMouseSettings] = useState<MouseSettings>(readMouseSettings)
+  const changeMouseSettings = (settings: MouseSettings) => {
+    setMouseSettings(settings)
+    try { localStorage.setItem('pocketboard-mouse-settings', JSON.stringify(settings)) } catch { /* Settings remain active for this session. */ }
+  }
   const [exportOpen, setExportOpen] = useState(false)
   const [savingState, setSavingState] = useState<'Saving' | 'Saved' | 'Not saved'>('Saved')
   const [imagePalette, setImagePalette] = useState<{ name: string; colors: string[] } | null>(() => {
@@ -510,6 +533,25 @@ function App() {
       ? { ...layer, maskStrokes: [...(layer.maskStrokes || []), stroke] }
       : layer))
   }, [commitLayers])
+
+  const addMaskSelection = useCallback((id: string, selection: MaskSelection, source: DesignLayer) => {
+    const current = layersRef.current
+    const target = current.find((layer) => layer.id === id)
+    if (!target || target.locked || target.src !== source.src || target.imageScale !== source.imageScale || target.imageOffsetX !== source.imageOffsetX || target.imageOffsetY !== source.imageOffsetY || target.width !== source.width || target.height !== source.height) {
+      showToast('Image changed. Make the selection again.')
+      return
+    }
+    commitLayers(current.map((layer) => layer.id === id ? { ...layer, maskSelections: [...(layer.maskSelections || []), selection] } : layer), 'Mask applied')
+  }, [commitLayers, showToast])
+
+  const activateSelection = (tool: 'polygon-mask' | 'wand-mask') => {
+    const target = layersRef.current.find((layer) => layer.id === selectedId)
+    if (!target || target.type !== 'image') { showToast('Select an image to mask.'); return }
+    if (target.locked) { showToast('Unlock the image before masking.'); return }
+    finishTextEditing()
+    setActiveTool(tool)
+    setMobileSheet(null)
+  }
 
   const clearPaintMask = useCallback((id: string) => {
     const current = layersRef.current
@@ -988,6 +1030,7 @@ function App() {
         onObjectSelect={() => { finishTextEditing(); setActiveTool('object-select') }}
         onGrid={() => setGridVisible((visible) => !visible)} gridVisible={gridVisible}
         onGuides={toggleGuides} guidesVisible={guidesVisible}
+        onMouseSettings={() => setMobileSheet('mouse')}
         onZoomIn={() => setZoom((value) => clamp(value + 15, 5, 6400))}
         onZoomOut={() => setZoom((value) => clamp(value - 15, 5, 6400))}
         onBrowseShapes={() => setMobileSheet('shapes')}
@@ -1001,6 +1044,7 @@ function App() {
           onTool={(tool) => {
             if (tool === 'image') imageInputRef.current?.click()
             else if (tool === 'brush') activateMaskBrush()
+            else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
             else {
               finishTextEditing()
               setActiveTool(tool)
@@ -1021,6 +1065,7 @@ function App() {
             onSelect={setSelectedId}
             onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
             onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
+            onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
             onAdd={() => addLayer('rectangle')}
             onDuplicate={duplicateSelected}
             onDelete={deleteSelected}
@@ -1063,6 +1108,7 @@ function App() {
             selected={selected}
             activeTool={activeTool}
             zoom={zoom}
+            mouseSettings={mouseSettings}
             gridVisible={gridVisible}
             gridSize={gridSize}
             guidesVisible={guidesVisible}
@@ -1070,6 +1116,10 @@ function App() {
             editingTextId={editingTextId}
             maskBrushMode={maskBrushMode}
             maskBrushSize={maskBrushSize}
+            selectionMode={selectionMode} onSelectionMode={setSelectionMode}
+            selectionTolerance={selectionTolerance} onSelectionTolerance={setSelectionTolerance}
+            selectionFeather={selectionFeather} onSelectionFeather={setSelectionFeather}
+            onApplyMaskSelection={addMaskSelection} onSelectionError={showToast} onFinishSelection={() => setActiveTool('select')}
             pickingColor={Boolean(colorPick)}
             onPickColor={pickCanvasColor}
             onSelect={(id) => {
@@ -1165,7 +1215,8 @@ function App() {
       />
 
       {mobileSheet && (
-        <MobileSheetView title={mobileSheet === 'layers' ? 'Layers' : mobileSheet === 'properties' ? 'Properties' : mobileSheet === 'shapes' ? 'Add shape' : mobileSheet === 'artboards' ? 'Artboards' : mobileSheet === 'mask' ? 'Crop and mask' : 'More'} onClose={() => setMobileSheet(null)}>
+        <MobileSheetView title={mobileSheet === 'layers' ? 'Layers' : mobileSheet === 'properties' ? 'Properties' : mobileSheet === 'shapes' ? 'Add shape' : mobileSheet === 'artboards' ? 'Artboards' : mobileSheet === 'mask' ? 'Crop and mask' : mobileSheet === 'mouse' ? 'Mouse settings' : 'More'} onClose={() => setMobileSheet(null)}>
+          {mobileSheet === 'mouse' && <MouseSettingsPanel settings={mouseSettings} onChange={changeMouseSettings} />}
           {mobileSheet === 'layers' && (
             <LayersPanel
               layers={layers}
@@ -1173,6 +1224,7 @@ function App() {
               onSelect={(id) => { setSelectedId(id); setMobileSheet(null) }}
               onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
               onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
+              onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
               onAdd={() => addLayer('rectangle')}
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
@@ -1237,6 +1289,8 @@ function App() {
                 setMobileSheet(null)
               }}
               onBrushMask={activateMaskBrush}
+              onPolygonMask={() => activateSelection('polygon-mask')}
+              onWandMask={() => activateSelection('wand-mask')}
               onClearPaintMask={() => clearPaintMask(selected.id)}
             />
           )}
@@ -1248,6 +1302,7 @@ function App() {
                 else if (action === 'grid') setGridVisible((visible) => !visible)
                 else if (action === 'rulers') toggleGuides()
                 else if (action === 'artboards') { openArtboardManager(); return }
+                else if (action === 'mouse') { setMobileSheet('mouse'); return }
                 else if (action === 'settings') { setMobileSheet('properties'); return }
                 else if (action === 'brush') { activateMaskBrush(); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner') setActiveTool(action)
@@ -1350,7 +1405,7 @@ type EditorMenuProps = {
   onDuplicate: () => void; onDelete: () => void; hasSelection: boolean
   onDeselect: () => void; onSelectTool: () => void; onObjectSelect: () => void
   onGrid: () => void; gridVisible: boolean; onGuides: () => void; guidesVisible: boolean
-  onZoomIn: () => void; onZoomOut: () => void
+  onZoomIn: () => void; onZoomOut: () => void; onMouseSettings: () => void
   onBrowseShapes: () => void; onInsertStarburst: () => void; onInsertSunburst: () => void
 }
 
@@ -1393,6 +1448,7 @@ function EditorMenu(props: EditorMenuProps) {
       { label: props.guidesVisible ? 'Hide guides' : 'Show guides', action: props.onGuides },
       { label: 'Zoom in', action: props.onZoomIn },
       { label: 'Zoom out', action: props.onZoomOut },
+      { label: 'Mouse settings', action: props.onMouseSettings },
     ] },
   ]
   return <nav className="editor-menu" ref={ref} aria-label="Editor menu" onBlur={(event) => {
@@ -1456,6 +1512,8 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'brush', label: 'Mask brush', shortcut: 'B', icon: <Brush /> },
+    { id: 'polygon-mask', label: 'Polygonal mask selection', icon: <Hexagon /> },
+    { id: 'wand-mask', label: 'Magic wand mask selection', icon: <Sparkles /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'text', label: 'Text', shortcut: 'T', icon: <Type />, divider: true },
     { id: 'image', label: 'Place image', icon: <ImageIcon /> },
@@ -1485,6 +1543,7 @@ interface LayersPanelProps {
   onSelect: (id: string) => void
   onToggleVisible: (layer: DesignLayer) => void
   onToggleLock: (layer: DesignLayer) => void
+  onToggleBlur: (layer: DesignLayer) => void
   onAdd: () => void
   onDuplicate: () => void
   onDelete: () => void
@@ -1634,6 +1693,7 @@ function LayersPanel(props: LayersPanelProps) {
             ><GripVertical size={14} /></button>
             <LayerThumbnail layer={layer} />
             <span className="layer-name">{layer.name}</span>
+            {layer.blur && <button className={`row-action blur-toggle ${layer.blur.enabled ? 'is-active' : ''}`} aria-label={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur for ${layer.name}`} aria-pressed={layer.blur.enabled} title={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur`} onClick={(event) => { event.stopPropagation(); props.onToggleBlur(layer) }}><Sparkles size={14} /></button>}
             <button className="row-action" aria-label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`} onClick={(event) => { event.stopPropagation(); props.onToggleVisible(layer) }}>
               {layer.visible ? <Eye size={15} /> : <EyeOff size={15} />}
             </button>
@@ -1676,6 +1736,7 @@ interface CanvasProps {
   selected: DesignLayer | null
   activeTool: Tool
   zoom: number
+  mouseSettings: MouseSettings
   gridVisible: boolean
   gridSize: number
   guidesVisible: boolean
@@ -1683,6 +1744,15 @@ interface CanvasProps {
   editingTextId: string | null
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
+  selectionMode: 'keep' | 'hide'
+  onSelectionMode: (mode: 'keep' | 'hide') => void
+  selectionTolerance: number
+  onSelectionTolerance: (value: number) => void
+  selectionFeather: number
+  onSelectionFeather: (value: number) => void
+  onApplyMaskSelection: (id: string, selection: MaskSelection, source: DesignLayer) => void
+  onSelectionError: (message: string) => void
+  onFinishSelection: () => void
   pickingColor: boolean
   onPickColor: (point: Point) => void
   onSelect: (id: string | null) => void
@@ -1741,6 +1811,7 @@ function Canvas(props: CanvasProps) {
   const layersRef = useRef(props.layers)
   const scrollRef = useRef<HTMLDivElement>(null)
   const touchPointersRef = useRef(new Map<number, Point>())
+  const mousePanCleanupRef = useRef<(() => void) | null>(null)
   const pinchRef = useRef<PinchState | null>(null)
   const pendingPinchFocusRef = useRef<PendingPinchFocus | null>(null)
   const zoomRef = useRef(props.zoom)
@@ -1752,7 +1823,14 @@ function Canvas(props: CanvasProps) {
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
   const [isPinching, setIsPinching] = useState(false)
+  const [wheelZooming, setWheelZooming] = useState(false)
+  const wheelZoomTimerRef = useRef<number | null>(null)
   const pickGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const selectionGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const selectionRequestRef = useRef(0)
+  const [selectionPoints, setSelectionPoints] = useState<Point[]>([])
+  const [selectionBusy, setSelectionBusy] = useState(false)
+  useEffect(() => { selectionRequestRef.current++; setSelectionPoints([]); setSelectionBusy(false) }, [props.activeTool, props.selected?.id])
   const [pickCursor, setPickCursor] = useState<Point>({ x: props.documentMeta.width / 2, y: props.documentMeta.height / 2 })
   useEffect(() => {
     if (props.pickingColor) {
@@ -1775,6 +1853,8 @@ function Canvas(props: CanvasProps) {
     transformCleanupRef.current?.()
     maskStrokeCleanupRef.current?.()
     cancelLongPressRef.current?.()
+    mousePanCleanupRef.current?.()
+    if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current)
   }, [])
   useLayoutEffect(() => {
     const pending = pendingPinchFocusRef.current
@@ -1788,6 +1868,39 @@ function Canvas(props: CanvasProps) {
     scroller.scrollTop += focusClientY - pending.clientY
     pendingPinchFocusRef.current = null
   }, [props.artboardRef, props.zoom])
+
+  const wheelAction = props.mouseSettings.wheel
+  const artboardRef = props.artboardRef
+  const onSetZoom = props.onSetZoom
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller) return
+    const onWheel = (event: WheelEvent) => {
+      if (isTextEditorTarget(event.target)) return
+      if (wheelAction === 'none') { event.preventDefault(); return }
+      if (wheelAction === 'pan') {
+        event.preventDefault()
+        const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1
+        scroller.scrollBy({ left: event.deltaX * factor, top: event.deltaY * factor })
+        return
+      }
+      const svg = artboardRef.current
+      if (!svg || !event.deltaY) return
+      event.preventDefault()
+      const rect = svg.getBoundingClientRect()
+      const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? scroller.clientHeight : 1
+      const next = clamp(zoomRef.current * Math.exp(-clamp(event.deltaY * factor, -500, 500) * 0.0015), 5, 6400)
+      if (next === zoomRef.current) return
+      pendingPinchFocusRef.current = { clientX: event.clientX, clientY: event.clientY, focusX: (event.clientX - rect.left) / Math.max(1, rect.width), focusY: (event.clientY - rect.top) / Math.max(1, rect.height) }
+      zoomRef.current = next
+      setWheelZooming(true)
+      if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current)
+      wheelZoomTimerRef.current = window.setTimeout(() => setWheelZooming(false), 150)
+      onSetZoom(next)
+    }
+    scroller.addEventListener('wheel', onWheel, { passive: false })
+    return () => scroller.removeEventListener('wheel', onWheel)
+  }, [artboardRef, wheelAction, onSetZoom])
 
   const pointerToCanvas = useCallback((clientX: number, clientY: number) => {
     const svg = props.artboardRef.current
@@ -1878,6 +1991,39 @@ function Canvas(props: CanvasProps) {
   }
 
   const onCanvasPointerDownCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === 'mouse' && !isTextEditorTarget(event.target)) {
+      const action = event.button === 0 ? props.mouseSettings.left : event.button === 1 ? props.mouseSettings.middle : event.button === 2 ? props.mouseSettings.right : 'default'
+      if (action === 'pan') {
+        event.preventDefault()
+        event.stopPropagation()
+        mousePanCleanupRef.current?.()
+        const scroller = event.currentTarget
+        const startX = event.clientX, startY = event.clientY
+        const left = scroller.scrollLeft, top = scroller.scrollTop, pointerId = event.pointerId
+        const move = (next: PointerEvent) => {
+          if (next.pointerId !== pointerId) return
+          scroller.scrollLeft = left - (next.clientX - startX)
+          scroller.scrollTop = top - (next.clientY - startY)
+        }
+        const cleanup = () => {
+          window.removeEventListener('pointermove', move)
+          window.removeEventListener('pointerup', finish)
+          window.removeEventListener('pointercancel', finish)
+          mousePanCleanupRef.current = null
+        }
+        const finish = (next: PointerEvent) => { if (next.pointerId === pointerId) cleanup() }
+        mousePanCleanupRef.current = cleanup
+        window.addEventListener('pointermove', move)
+        window.addEventListener('pointerup', finish)
+        window.addEventListener('pointercancel', finish)
+        return
+      }
+      if (action === 'none' || event.button !== 0) {
+        if (action === 'none') event.preventDefault()
+        event.stopPropagation()
+      }
+      return
+    }
     if (event.pointerType !== 'touch' || isTextEditorTarget(event.target)) return
     const pointers = touchPointersRef.current
     pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
@@ -1885,6 +2031,7 @@ function Canvas(props: CanvasProps) {
 
     if (pointers.size < 2 || pinchRef.current) return
     pickGestureRef.current = null
+    selectionGestureRef.current = null
     const entries = [...pointers.entries()].slice(0, 2) as [[number, Point], [number, Point]]
     const [[firstId, first], [secondId, second]] = entries
     const svg = props.artboardRef.current
@@ -1940,7 +2087,47 @@ function Canvas(props: CanvasProps) {
     props.onSelect(null)
   }
 
+  const normalizedSelectionPoint = (point: Point, layer: DesignLayer) => {
+    const cx = layer.x + layer.width / 2, cy = layer.y + layer.height / 2
+    const angle = -layer.rotation * Math.PI / 180
+    const dx = point.x - cx, dy = point.y - cy
+    let x = cx + dx * Math.cos(angle) - dy * Math.sin(angle)
+    let y = cy + dx * Math.sin(angle) + dy * Math.cos(angle)
+    if (layer.flipX) x = 2 * cx - x
+    if (layer.flipY) y = 2 * cy - y
+    return { x: (x - layer.x) / Math.max(1, layer.width), y: (y - layer.y) / Math.max(1, layer.height) }
+  }
+
+  const applyPolygonSelection = () => {
+    const layer = props.selected
+    if (!layer || layer.type !== 'image' || layer.locked || selectionPoints.length < 3) return
+    props.onApplyMaskSelection(layer.id, { kind: 'polygon', points: selectionPoints, mode: props.selectionMode, feather: props.selectionFeather }, layer)
+    setSelectionPoints([])
+    props.onFinishSelection()
+  }
+
+  const selectAt = (point: Point) => {
+    const layer = props.selected
+    if (!layer || layer.type !== 'image' || layer.locked || selectionBusy) return
+    const local = normalizedSelectionPoint(point, layer)
+    if (props.activeTool === 'polygon-mask') { setSelectionPoints((points) => [...points, local]); return }
+    if (props.activeTool !== 'wand-mask') return
+    if (local.x < 0 || local.x > 1 || local.y < 0 || local.y > 1) { props.onSelectionError('Tap inside the selected image.'); return }
+    const request = ++selectionRequestRef.current
+    setSelectionBusy(true)
+    void magicWandMask(layer, local, props.selectionTolerance, props.selectionMode).then((image) => {
+      if (request !== selectionRequestRef.current) return
+      props.onApplyMaskSelection(layer.id, { kind: 'wand', image, mode: props.selectionMode, feather: props.selectionFeather }, layer)
+      props.onFinishSelection()
+    }).catch(() => { if (request === selectionRequestRef.current) props.onSelectionError('Could not read this image for the magic wand.') }).finally(() => { if (request === selectionRequestRef.current) setSelectionBusy(false) })
+  }
+
   const finishCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const selectionGesture = selectionGestureRef.current
+    if (selectionGesture?.pointerId === event.pointerId) {
+      selectionGestureRef.current = null
+      if (event.type === 'pointerup' && !pinchRef.current && Math.hypot(event.clientX - selectionGesture.x, event.clientY - selectionGesture.y) < 10) selectAt(pointerToCanvas(event.clientX, event.clientY))
+    }
     const gesture = pickGestureRef.current
     if (gesture?.pointerId === event.pointerId) {
       pickGestureRef.current = null
@@ -2353,10 +2540,12 @@ function Canvas(props: CanvasProps) {
       onPointerDown={(event) => onLayerPointerDown(event, layer)} onDoubleClick={(event) => onLayerDoubleClick(event, layer)} />
   ))
   return (
+    <>
     <div
       ref={scrollRef}
-      className={`canvas-scroll ${isPinching ? 'is-pinching' : ''} ${props.pickingColor ? 'is-picking-color' : ''}`}
+      className={`canvas-scroll ${isPinching || wheelZooming ? 'is-pinching' : ''} ${props.pickingColor ? 'is-picking-color' : ''}`}
       onPointerDownCapture={onCanvasPointerDownCapture}
+      onContextMenu={(event) => { if (props.mouseSettings.right !== 'default') event.preventDefault() }}
       onPointerDown={onCanvasSurfacePointerDown}
       onPointerMoveCapture={onCanvasPointerMoveCapture}
       onPointerUpCapture={finishCanvasPointer}
@@ -2369,13 +2558,14 @@ function Canvas(props: CanvasProps) {
           ref={props.artboardRef}
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
-          role={props.pickingColor ? 'application' : 'img'}
-          tabIndex={props.pickingColor ? 0 : undefined}
-          aria-label={props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          role={props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'application' : 'img'}
+          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 0 : undefined}
+          aria-label={['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
           onKeyDown={(event) => {
-            if (!props.pickingColor) return
+            const selectionActive = props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask'
+            if (!props.pickingColor && !selectionActive) return
             const step = event.shiftKey ? 10 : 1
-            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); props.onPickColor(pickCursor); return }
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else props.onPickColor(pickCursor); return }
             if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
             event.preventDefault()
             event.stopPropagation()
@@ -2385,6 +2575,13 @@ function Canvas(props: CanvasProps) {
             }))
           }}
           onPointerDownCapture={(event) => {
+            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') {
+              if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
+              event.preventDefault(); event.stopPropagation()
+              selectionGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+              try { scrollRef.current?.setPointerCapture(event.pointerId) } catch { /* best effort */ }
+              return
+            }
             if (!props.pickingColor) { startArtboardLongPress(event); return }
             if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
             event.preventDefault()
@@ -2404,13 +2601,17 @@ function Canvas(props: CanvasProps) {
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
           <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
-          {props.pickingColor && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {(props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
             ? <line key={guide.id} className="user-guide guide-x" x1={guide.position} x2={guide.position} y1="0" y2={props.documentMeta.height} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />
             : <line key={guide.id} className="user-guide guide-y" y1={guide.position} y2={guide.position} x1="0" x2={props.documentMeta.width} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />)}
           {smartGuides.x !== undefined && <line className="smart-guide" x1={smartGuides.x} x2={smartGuides.x} y1="0" y2={props.documentMeta.height} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {smartGuides.y !== undefined && <line className="smart-guide" y1={smartGuides.y} y2={smartGuides.y} x1="0" x2={props.documentMeta.width} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {props.activeTool === 'polygon-mask' && props.selected && selectionPoints.length > 0 && <g transform={layerTransform(props.selected)} pointerEvents="none">
+            <polyline points={selectionPoints.map((point) => `${props.selected!.x + point.x * props.selected!.width},${props.selected!.y + point.y * props.selected!.height}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />
+            {selectionPoints.map((point, index) => <circle key={index} cx={props.selected!.x + point.x * props.selected!.width} cy={props.selected!.y + point.y * props.selected!.height} r={5 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="white" stroke={ACCENT} vectorEffect="non-scaling-stroke" />)}
+          </g>}
           {draftPoints.length > 0 && props.activeTool === 'brush' && <path className="mask-brush-preview" d={smoothPath(draftPoints, .55)} fill="none" stroke={props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} strokeWidth={props.maskBrushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".58" pointerEvents="none" />}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
           {props.selected?.visible && props.editingTextId !== props.selected.id && (
@@ -2440,6 +2641,16 @@ function Canvas(props: CanvasProps) {
       </div>
       </div>
     </div>
+    {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className="selection-tool-controls" aria-label="Mask selection controls">
+      <span>{props.activeTool === 'polygon-mask' ? 'Tap points around the object' : 'Tap a colour in the image'}</span>
+      <label>Action <select aria-label="Selection mask action" value={props.selectionMode} onChange={(event) => props.onSelectionMode(event.target.value as 'keep' | 'hide')}><option value="keep">Keep selection</option><option value="hide">Mask selection out</option></select></label>
+      {props.activeTool === 'wand-mask' && <label>Tolerance <input aria-label="Magic wand tolerance" type="number" min="0" max="255" value={props.selectionTolerance} onChange={(event) => props.onSelectionTolerance(clamp(Number(event.target.value), 0, 255))} /></label>}
+      <label>Feather <input aria-label="Selection feather" type="number" min="0" max="20" value={props.selectionFeather} onChange={(event) => props.onSelectionFeather(clamp(Number(event.target.value), 0, 20))} /></label>
+      {props.activeTool === 'polygon-mask' && <button className="button primary" disabled={selectionPoints.length < 3} onClick={applyPolygonSelection}>Apply selection</button>}
+      <button className="button secondary" onClick={props.onFinishSelection}>{selectionBusy ? 'Cancel processing' : 'Cancel'}</button>
+      {selectionBusy && <span role="status">Selecting…</span>}
+    </div>}
+    </>
   )
 }
 
@@ -2459,10 +2670,20 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
             ? <polygon points={starPoints(layer.x + layer.width / 2, layer.y + layer.height / 2, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} />
             : <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={mask === 'rounded' ? Math.min(layer.width, layer.height) * .16 : layer.radius || 0} />}
       </clipPath>}
-      {Boolean(layer.maskStrokes?.length) && (
+      {layer.maskSelections?.map((selection, index) => <g key={index}>
+        {selection.feather > 0 && <filter id={`selection-feather-${layer.id}-${index}`} filterUnits="userSpaceOnUse" {...selectionFeatherBounds(layer, selection.feather)}><feGaussianBlur stdDeviation={selection.feather} /></filter>}
+        <mask id={`selection-mask-${layer.id}-${index}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={layer.x} y={layer.y} width={layer.width} height={layer.height}>
+          <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} fill={selection.mode === 'keep' ? 'black' : 'white'} />
+          {selection.kind === 'polygon'
+            ? <polygon points={selection.points.map((point) => `${layer.x + point.x * layer.width},${layer.y + point.y * layer.height}`).join(' ')} fill={selection.mode === 'keep' ? 'white' : 'black'} filter={selection.feather ? `url(#selection-feather-${layer.id}-${index})` : undefined} />
+            : <image href={selection.image} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="none" filter={selection.feather ? `url(#selection-feather-${layer.id}-${index})` : undefined} />}
+        </mask>
+      </g>)}
+      {layer.blur?.enabled && layer.blur.type === 'gaussian' && <filter id={`blur-${layer.id}`} filterUnits="userSpaceOnUse" {...gaussianBounds(layer)} colorInterpolationFilters="sRGB"><feGaussianBlur stdDeviation={layer.blur.amount} /></filter>}
+      {Boolean(layer.maskStrokes?.length || layer.maskSelections?.length) && (
         <mask id={`paint-mask-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3}>
-          <rect x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3} fill="white" />
-          {layer.maskStrokes!.map((stroke, index) => (
+          {(layer.maskSelections || []).reduce<ReactNode>((node, _selection, index) => <g mask={`url(#selection-mask-${layer.id}-${index})`}>{node}</g>, <rect x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3} fill="white" />)}
+          {layer.maskStrokes?.map((stroke, index) => (
             <path key={index} d={smoothPath(maskStrokePoints(layer, stroke), .55)} fill="none" stroke={stroke.mode === 'hide' ? 'black' : 'white'} strokeWidth={maskStrokeWidth(layer, stroke)} strokeLinecap="round" strokeLinejoin="round" />
           ))}
         </mask>
@@ -2490,6 +2711,38 @@ function layerTransform(layer: DesignLayer) {
     ? ` translate(${cx} ${cy}) scale(${layer.flipX ? -1 : 1} ${layer.flipY ? -1 : 1}) translate(${-cx} ${-cy})`
     : ''
   return `rotate(${layer.rotation} ${cx} ${cy})${flip}`
+}
+
+function selectionFeatherBounds(layer: DesignLayer, feather: number) {
+  const pad = feather * 4 + 2
+  return { x: layer.x - pad, y: layer.y - pad, width: layer.width + pad * 2, height: layer.height + pad * 2 }
+}
+
+function gaussianBounds(layer: DesignLayer) {
+  const extent = Math.hypot(layer.width, layer.height) / 2 + Math.abs(layer.strokeWidth) + (layer.blur?.amount || 0) * 4 + 2
+  return { x: layer.x + layer.width / 2 - extent, y: layer.y + layer.height / 2 - extent, width: extent * 2, height: extent * 2 }
+}
+
+// A weighted set of translated or scaled samples approximates a shutter exposure.
+// These transforms are shared by the editor, exports and the canvas eyedropper.
+function blurSamples(layer: DesignLayer): { transform: string; opacity: number }[] {
+  const blur = layer.blur
+  if (!blur?.enabled || blur.type === 'gaussian' || blur.amount <= 0) return []
+  const count = 17
+  const angle = blur.angle * Math.PI / 180
+  const cx = layer.x + layer.width / 2, cy = layer.y + layer.height / 2
+  return Array.from({ length: count }, (_, index) => {
+    const t = index / (count - 1) - .5
+    if (blur.type === 'radial') {
+      const scale = Math.max(.05, 1 + t * blur.amount / 100)
+      return { transform: `translate(${cx} ${cy}) scale(${scale}) translate(${-cx} ${-cy})`, opacity: 1 / count }
+    }
+    const along = t * blur.amount
+    const bend = blur.type === 'path' ? (t * t - .25) * blur.amount * blur.curvature / 100 : 0
+    const x = along * Math.cos(angle) - bend * Math.sin(angle)
+    const y = along * Math.sin(angle) + bend * Math.cos(angle)
+    return { transform: `translate(${x} ${y})`, opacity: 1 / count }
+  })
 }
 
 function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
@@ -2535,14 +2788,16 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
       </text>
     )
   }
+  const source = <g transform={transform} mask={layer.maskStrokes?.length || layer.maskSelections?.length ? `url(#paint-mask-${layer.id})` : undefined}>{content}</g>
+  const samples = blurSamples(layer)
   return <g
-    transform={transform}
-    mask={layer.maskStrokes?.length ? `url(#paint-mask-${layer.id})` : undefined}
     onPointerDown={onPointerDown}
     onDoubleClick={onDoubleClick}
     data-layer={layer.id}
-    style={{ cursor: layer.locked ? 'not-allowed' : undefined, mixBlendMode: layer.blendMode || 'normal' }}
-  >{content}</g>
+    style={{ cursor: layer.locked ? 'not-allowed' : undefined, mixBlendMode: layer.blendMode || 'normal', isolation: 'isolate' }}
+  >{layer.blur?.enabled && layer.blur.type === 'gaussian'
+    ? <g filter={`url(#blur-${layer.id})`}>{source}</g>
+    : samples.length ? samples.map((sample, index) => <g key={index} transform={sample.transform} opacity={sample.opacity} style={{ mixBlendMode: 'plus-lighter' }}>{source}</g>) : source}</g>
 }
 
 function TextEditorOverlay({ layer, onUpdate, onFinish }: {
@@ -3043,11 +3298,31 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         </PropertySection>
       )}
 
+      {layer.type === 'image' && <PropertySection title="Selection masks">
+        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('polygon-mask')}><Hexagon size={16} /> Polygonal selection</button>
+        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('wand-mask')}><Sparkles size={16} /> Magic wand selection</button>
+        {Boolean(layer.maskSelections?.length) && <button className="button secondary full-button" onClick={() => props.onUpdate({ maskSelections: [] })}>Clear selection masks</button>}
+      </PropertySection>}
+
       {layer.type === 'image' && <PropertySection title="Image palette">
         <button className="button secondary full-button" disabled={props.extractingPalette || !layer.src} onClick={props.onExtractPalette}><Palette size={16} />{props.extractingPalette ? 'Extracting…' : 'Extract palette from image'}</button>
         {props.imagePalette && <ImagePalettePreview palette={props.imagePalette} />}
         <small className="palette-note">Colours are extracted from the original image on this device.</small>
       </PropertySection>}
+
+      <PropertySection title="Blur">
+        <label className="blur-select"><span>Effect</span><select aria-label="Blur effect" value={layer.blur?.type || 'none'} onChange={(event) => {
+          const type = event.target.value as BlurType | 'none'
+          props.onUpdate({ blur: type === 'none' ? undefined : { type, amount: layer.blur?.amount ?? 12, angle: layer.blur?.angle ?? 0, curvature: layer.blur?.curvature ?? 50, enabled: true } })
+        }}><option value="none">None</option><option value="gaussian">Gaussian</option><option value="motion">Motion</option><option value="radial">Radial zoom</option><option value="path">Curved path</option></select></label>
+        {layer.blur && <>
+          <button className="button secondary full-button" aria-pressed={layer.blur.enabled} onClick={() => props.onUpdate({ blur: { ...layer.blur!, enabled: !layer.blur!.enabled } })}>{layer.blur.enabled ? 'Disable blur' : 'Enable blur'}</button>
+          <SliderField label="Blur amount" value={layer.blur.amount} min={0} max={100} unit={layer.blur.type === 'radial' ? '%' : 'px'} onChange={(amount) => props.onUpdate({ blur: { ...layer.blur!, amount: clamp(amount, 0, 100) } })} />
+          {(layer.blur.type === 'motion' || layer.blur.type === 'path') && <SliderField label="Blur angle" value={layer.blur.angle} min={0} max={360} unit="°" onChange={(angle) => props.onUpdate({ blur: { ...layer.blur!, angle: clamp(angle, 0, 360) } })} />}
+          {layer.blur.type === 'path' && <SliderField label="Path curvature" value={layer.blur.curvature} min={-100} max={100} unit="%" onChange={(curvature) => props.onUpdate({ blur: { ...layer.blur!, curvature: clamp(curvature, -100, 100) } })} />}
+          {layer.blur.type !== 'gaussian' && <small className="palette-note">Blur uses sampled exposure for local rendering.</small>}
+        </>}
+      </PropertySection>
 
       <PropertySection title="Position" actions={<button className={`link-toggle ${linked ? 'active' : ''}`} onClick={() => setLinked(!linked)} aria-label="Lock proportions"><Link2 size={14} /></button>}>
         <div className="dimension-pair">
@@ -3208,9 +3483,50 @@ function ImagePalettePreview({ palette }: { palette: { name: string; colors: str
   </div>
 }
 
+function hexToHsv(hex: string) {
+  const color = normalizeColor(hex)
+  const [r, g, b] = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16) / 255)
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min
+  let hue = 0
+  if (delta) {
+    if (max === r) hue = ((g - b) / delta + 6) % 6
+    else if (max === g) hue = (b - r) / delta + 2
+    else hue = (r - g) / delta + 4
+  }
+  return { h: hue * 60, s: max ? delta / max : 0, v: max }
+}
+
+function hsvToHex(h: number, s: number, v: number) {
+  const chroma = v * s, x = chroma * (1 - Math.abs((h / 60) % 2 - 1)), m = v - chroma
+  const channels = h < 60 ? [chroma, x, 0] : h < 120 ? [x, chroma, 0] : h < 180 ? [0, chroma, x] : h < 240 ? [0, x, chroma] : h < 300 ? [x, 0, chroma] : [chroma, 0, x]
+  return `#${channels.map((channel) => Math.round((channel + m) * 255).toString(16).padStart(2, '0')).join('')}`
+}
+
 function ColorInput({ label, value, onChange, onPickColor }: { label: string; value: string; onChange: (value: string) => void; onPickColor: (apply: (color: string) => void) => void }) {
   const colour = normalizeColor(value)
-  return (
+  const [wheelOpen, setWheelOpen] = useState(false)
+  const memory = useRef({ ...hexToHsv(colour), color: colour })
+  const [, refreshWheel] = useState(0)
+  if (memory.current.color !== colour) {
+    const next = hexToHsv(colour)
+    memory.current = { h: next.s ? next.h : memory.current.h, s: next.v ? next.s : memory.current.s, v: next.v, color: colour }
+  }
+  const hsv = memory.current
+  const updateHsv = (h: number, s: number, v: number) => {
+    const color = hsvToHex(h, s, v)
+    memory.current = { h, s, v, color }
+    if (color.toLowerCase() === colour.toLowerCase()) refreshWheel((value) => value + 1)
+    else onChange(color)
+  }
+  const updateWheel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const dx = (event.clientX - rect.left - rect.width / 2) / (rect.width / 2)
+    const dy = (event.clientY - rect.top - rect.height / 2) / (rect.height / 2)
+    const hue = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360
+    updateHsv(hue, Math.min(1, Math.hypot(dx, dy)), hsv.v)
+  }
+  const angle = hsv.h * Math.PI / 180
+  return <div className="color-control">
     <div className="color-field">
       <label className="color-swatch" style={{ background: colour }} title="Choose colour">
         <input type="color" value={colour} onChange={(event) => onChange(event.target.value)} aria-label={`${label} colour`} />
@@ -3221,8 +3537,18 @@ function ColorInput({ label, value, onChange, onPickColor }: { label: string; va
         if (/^#[0-9A-Fa-f]{6}$/.test(next)) onChange(next)
       }} aria-label={`${label} hex value`} />
       <button type="button" className="color-pick-button" aria-label={`Pick ${label.toLowerCase()} colour from canvas`} title="Pick colour from canvas" onClick={() => onPickColor(onChange)}><Pipette size={16} /></button>
+      <button type="button" className="color-pick-button" aria-label={`${wheelOpen ? 'Close' : 'Open'} ${label.toLowerCase()} colour wheel`} aria-expanded={wheelOpen} title="Colour wheel" onClick={() => setWheelOpen(!wheelOpen)}><Palette size={16} /></button>
     </div>
-  )
+    {wheelOpen && <div className="custom-colour-picker">
+      <div className="colour-wheel" aria-hidden="true" onPointerDown={(event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); updateWheel(event) }} onPointerMove={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updateWheel(event) }}>
+        <div className="colour-wheel-shade" style={{ opacity: 1 - hsv.v }} />
+        <span className="colour-wheel-marker" style={{ left: `${50 + Math.cos(angle) * hsv.s * 50}%`, top: `${50 + Math.sin(angle) * hsv.s * 50}%` }} />
+      </div>
+      <label>Hue <input type="range" min="0" max="359" value={Math.round(hsv.h)} aria-label={`${label} hue`} onChange={(event) => updateHsv(Number(event.target.value), hsv.s, hsv.v)} /></label>
+      <label>Saturation <input type="range" min="0" max="100" value={Math.round(hsv.s * 100)} aria-label={`${label} saturation`} onChange={(event) => updateHsv(hsv.h, Number(event.target.value) / 100, hsv.v)} /></label>
+      <label>Brightness <input type="range" min="0" max="100" value={Math.round(hsv.v * 100)} aria-label={`${label} brightness`} onChange={(event) => updateHsv(hsv.h, hsv.s, Number(event.target.value) / 100)} /></label>
+    </div>}
+  </div>
 }
 
 function normalizeColor(value: string) {
@@ -3438,11 +3764,13 @@ function ArtboardManager({ artboards, activeId, onSwitch, onAdd, onDelete }: {
   )
 }
 
-function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onClearPaintMask }: {
+function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onPolygonMask, onWandMask, onClearPaintMask }: {
   layer: DesignLayer
   onUpdate: (patch: Partial<DesignLayer>) => void
   onMoveImage: () => void
   onBrushMask: () => void
+  onPolygonMask: () => void
+  onWandMask: () => void
   onClearPaintMask: () => void
 }) {
   const mask = layer.mask || 'none'
@@ -3459,6 +3787,9 @@ function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onClearPaintMask
       <div className="mask-choice-grid">{masks.map((item) => <button key={item.id} className={mask === item.id ? 'active' : ''} onClick={() => onUpdate({ mask: item.id })} aria-pressed={mask === item.id}>{item.icon}<span>{item.label}</span>{mask === item.id && <i><Check size={11} /></i>}</button>)}</div>
       <SliderField label="Image scale" value={round((layer.imageScale || 1) * 100)} min={100} max={300} unit="%" onChange={(value) => onUpdate({ imageScale: value / 100 })} />
       <div className="mask-panel-actions">
+        <button className="button secondary full-button" onClick={onPolygonMask}><Hexagon size={17} /> Polygonal selection</button>
+        <button className="button secondary full-button" onClick={onWandMask}><Sparkles size={17} /> Magic wand selection</button>
+        {Boolean(layer.maskSelections?.length) && <button className="button secondary full-button" onClick={() => onUpdate({ maskSelections: [] })}>Clear selection masks</button>}
         <button className="button primary full-button" onClick={onBrushMask}><Brush size={17} /> Refine with mask brush</button>
         <button className="button secondary full-button" onClick={onMoveImage}><Move size={17} /> Move image inside mask</button>
         {Boolean(layer.maskStrokes?.length) && <button className="button secondary full-button" onClick={onClearPaintMask}>Clear brush mask</button>}
@@ -3496,6 +3827,23 @@ function ShapesGrid({ onAdd }: { onAdd: (type: LayerType, point?: { x: number; y
   </div>
 }
 
+function MouseSettingsPanel({ settings, onChange }: { settings: MouseSettings; onChange: (settings: MouseSettings) => void }) {
+  return <div className="mouse-settings">
+    <p>Choose how the mouse behaves over the canvas. Touch gestures are unchanged.</p>
+    {(['left', 'right', 'middle'] as const).map((button) => <label key={button}>
+      <span>{button === 'left' ? 'Left click' : button === 'right' ? 'Right click' : 'Middle click'}</span>
+      <select value={settings[button]} onChange={(event) => onChange({ ...settings, [button]: event.target.value as MouseButtonAction })}>
+        <option value="default">{button === 'right' ? 'Browser context menu' : button === 'left' ? 'Current tool' : 'Browser default'}</option>
+        <option value="pan">Pan canvas</option><option value="none">No action</option>
+      </select>
+    </label>)}
+    <label><span>Scroll wheel</span><select value={settings.wheel} onChange={(event) => onChange({ ...settings, wheel: event.target.value as MouseSettings['wheel'] })}>
+      <option value="zoom">Zoom at pointer</option><option value="pan">Scroll canvas</option><option value="none">No action</option>
+    </select></label>
+    <button className="button secondary" onClick={() => onChange({ ...DEFAULT_MOUSE })}>Reset to defaults</button>
+  </div>
+}
+
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
     { id: 'new', label: 'New design', icon: <Plus /> },
@@ -3508,6 +3856,7 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'grid', label: 'Layout grid', icon: <Grid3X3 /> },
     { id: 'rulers', label: 'Rulers and guides', icon: <Ruler /> },
     { id: 'settings', label: 'Design settings', icon: <Settings2 /> },
+    { id: 'mouse', label: 'Mouse settings', icon: <MousePointer2 /> },
     { id: 'export', label: 'Export design', icon: <Download /> },
   ]
   return <div className="more-menu-list">{actions.map((action) => <button key={action.id} onClick={() => onAction(action.id)}>{action.icon}<span>{action.label}</span><ChevronRight /></button>)}</div>
@@ -3701,6 +4050,20 @@ function escapeXml(value: string) {
 function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground: boolean) {
   const defs = layers.map((layer) => {
     let definition = ''
+    layer.maskSelections?.forEach((selection, index) => {
+      const id = `${layer.id}-${index}`
+      if (selection.feather > 0) {
+        const bounds = selectionFeatherBounds(layer, selection.feather)
+        definition += `<filter id="selection-feather-${id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}"><feGaussianBlur stdDeviation="${selection.feather}"/></filter>`
+      }
+      const filter = selection.feather ? ` filter="url(#selection-feather-${id})"` : ''
+      const shape = selection.kind === 'polygon' ? `<polygon points="${selection.points.map((point) => `${layer.x + point.x * layer.width},${layer.y + point.y * layer.height}`).join(' ')}" fill="${selection.mode === 'keep' ? 'white' : 'black'}"${filter}/>` : `<image href="${escapeXml(selection.image)}" x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" preserveAspectRatio="none"${filter}/>`
+      definition += `<mask id="selection-mask-${id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}"><rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" fill="${selection.mode === 'keep' ? 'black' : 'white'}"/>${shape}</mask>`
+    })
+    if (layer.blur?.enabled && layer.blur.type === 'gaussian') {
+      const bounds = gaussianBounds(layer)
+      definition += `<filter id="blur-${layer.id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="${layer.blur.amount}"/></filter>`
+    }
     if (layer.fillType && layer.fillType !== 'solid' && layer.gradient) {
       const stops = layer.gradient.stops.map((stop) => `<stop offset="${stop.offset * 100}%" stop-color="${stop.color}"/>`).join('')
       definition += layer.gradient.type === 'linear'
@@ -3716,10 +4079,11 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
           : `<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${mask === 'rounded' ? Math.min(layer.width, layer.height) * .16 : layer.radius || 0}"/>`
       definition += `<clipPath id="clip-${layer.id}">${shape}</clipPath>`
     }
-    if (layer.maskStrokes?.length) {
+    if (layer.maskStrokes?.length || layer.maskSelections?.length) {
       const maskExtent = Math.max(layer.width, layer.height, 1)
-      const strokes = layer.maskStrokes.map((stroke) => `<path d="${smoothPath(maskStrokePoints(layer, stroke), .55)}" fill="none" stroke="${stroke.mode === 'hide' ? 'black' : 'white'}" stroke-width="${maskStrokeWidth(layer, stroke)}" stroke-linecap="round" stroke-linejoin="round"/>`).join('')
-      definition += `<mask id="paint-mask-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}"><rect x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}" fill="white"/>${strokes}</mask>`
+      const strokes = (layer.maskStrokes || []).map((stroke) => `<path d="${smoothPath(maskStrokePoints(layer, stroke), .55)}" fill="none" stroke="${stroke.mode === 'hide' ? 'black' : 'white'}" stroke-width="${maskStrokeWidth(layer, stroke)}" stroke-linecap="round" stroke-linejoin="round"/>`).join('')
+      const base = (layer.maskSelections || []).reduce((node, _selection, index) => `<g mask="url(#selection-mask-${layer.id}-${index})">${node}</g>`, `<rect x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}" fill="white"/>`)
+      definition += `<mask id="paint-mask-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}">${base}${strokes}</mask>`
     }
     return definition
   }).join('')
@@ -3729,7 +4093,12 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const transform = layerTransform(layer)
     const opacity = layer.opacity
     const fill = layer.fillType && layer.fillType !== 'solid' && layer.gradient ? `url(#gradient-${layer.id})` : layer.fill
-    const wrap = (element: string) => `<g transform="${transform}"${layer.maskStrokes?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}${layer.blendMode && layer.blendMode !== 'normal' ? ` style="mix-blend-mode:${layer.blendMode}"` : ''}>${element}</g>`
+    const wrap = (element: string) => {
+      const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
+      const samples = blurSamples(layer)
+      const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
+      return `<g style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
+    }
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${layer.stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
