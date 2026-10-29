@@ -4672,3 +4672,62 @@ button:disabled {
   color: var(--accent);
   background: var(--accent-subtle);
 }
+
+.color-pick-button {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+}
+.color-pick-button:hover, .color-pick-button:focus-visible { background: var(--surface-hover); }
+.is-picking-color, .is-picking-color .artboard, .is-picking-color .artboard * { cursor: crosshair !important; }
+.color-pick-banner {
+  position: absolute;
+  z-index: 12;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  white-space: nowrap;
+  font-size: 12px;
+}
+.color-pick-banner button {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
+  .color-pick-button { width: 44px; height: 44px; flex-basis: 44px; }
+}
+.gradient-stops { grid-template-columns: 1fr; }
+.gradient-stops .color-label { display: block; }
+.color-field { min-width: 0; min-height: 40px; }
+.hex-input { min-width: 0; }
+
+.save-button { height: 36px; gap: 6px; }
+.image-palette-preview > span, .palette-note { color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+.image-palette-preview > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.image-palette-preview > div > div { min-width: 0; }
+.image-palette-preview > div > div > span { display: block; width: 100%; height: 28px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.image-palette-preview code { display: block; margin-top: 3px; font: 10px Inter, sans-serif; color: var(--text-secondary); }
+.gradient-stops > div > .colour-palette { margin-top: 6px; }
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
+  .save-button { width: 40px; min-width: 40px; height: 40px; padding: 0; }
+  .save-button span { display: none; }
+}
