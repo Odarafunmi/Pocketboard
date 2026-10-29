@@ -51,6 +51,7 @@ import {
   RotateCw,
   Ruler,
   ScanSearch,
+  Save,
   Search,
   Settings2,
   Share2,
@@ -87,6 +88,7 @@ import {
 import { flushSync } from 'react-dom'
 import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './data'
 import { textLines } from './textLayout'
+import { extractImagePalette } from './imagePalette'
 import { presetShapePath, shapeCategories } from './shapePresets'
 import type {
   ArtboardSnapshot,
@@ -197,8 +199,22 @@ function App() {
   const [mobileSheet, setMobileSheet] = useState<MobileSheet>(null)
   const [exportOpen, setExportOpen] = useState(false)
   const [savingState, setSavingState] = useState<'Saving' | 'Saved' | 'Not saved'>('Saved')
+  const [imagePalette, setImagePalette] = useState<{ name: string; colors: string[] } | null>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('pocketboard-image-palette') || 'null')
+      return stored && typeof stored.name === 'string' && Array.isArray(stored.colors) && stored.colors.every((color: unknown) => typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) ? stored : null
+    } catch { return null }
+  })
+  const [extractingPalette, setExtractingPalette] = useState(false)
+  const paletteRequestRef = useRef(0)
+  const selectedIdRef = useRef(selectedId)
+  selectedIdRef.current = selectedId
+  const saveTimerRef = useRef<number | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [draggingFiles, setDraggingFiles] = useState(false)
+  const [colorPick, setColorPick] = useState<{ apply: (color: string) => void; layerId: string | null; artboardId: string; tool: Tool; reopen: boolean } | null>(null)
+  const colorPickRef = useRef<typeof colorPick>(null)
+  const colorPickBusyRef = useRef(false)
   const [renaming, setRenaming] = useState(false)
   const artboardRef = useRef<SVGSVGElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -238,36 +254,127 @@ function App() {
     }
   }, [prefersDark])
 
+  const persistDocument = useCallback(() => {
+    try {
+      const currentLayers = layersRef.current
+      localStorage.setItem('pocketboard-layers', JSON.stringify(currentLayers))
+      localStorage.setItem('pocketboard-document-meta', JSON.stringify(documentMeta))
+      localStorage.setItem('pocketboard-project-name', projectName)
+      localStorage.setItem('pocketboard-active-artboard', activeArtboardId)
+      localStorage.setItem('pocketboard-artboards', JSON.stringify(artboards.map((artboard) => artboard.id === activeArtboardId
+        ? { ...artboard, document: documentMeta, layers: currentLayers }
+        : artboard)))
+      localStorage.setItem('pocketboard-grid', String(gridVisible))
+      localStorage.setItem('pocketboard-grid-size', String(gridSize))
+      localStorage.setItem('pocketboard-guides-visible', String(guidesVisible))
+      localStorage.setItem('pocketboard-guides', JSON.stringify(canvasGuides))
+      setSavingState('Saved')
+      return true
+    } catch {
+      setSavingState('Not saved')
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
+      setToast('Device storage is full. Export a project backup.')
+      return false
+    }
+  }, [documentMeta, projectName, activeArtboardId, artboards, gridVisible, gridSize, guidesVisible, canvasGuides])
+
   useEffect(() => {
     setSavingState('Saving')
-    const timer = window.setTimeout(() => {
-      try {
-        localStorage.setItem('pocketboard-layers', JSON.stringify(layers))
-        localStorage.setItem('pocketboard-document-meta', JSON.stringify(documentMeta))
-        localStorage.setItem('pocketboard-project-name', projectName)
-        localStorage.setItem('pocketboard-active-artboard', activeArtboardId)
-        localStorage.setItem('pocketboard-artboards', JSON.stringify(artboards.map((artboard) => artboard.id === activeArtboardId
-          ? { ...artboard, document: documentMeta, layers }
-          : artboard)))
-        localStorage.setItem('pocketboard-grid', String(gridVisible))
-        localStorage.setItem('pocketboard-grid-size', String(gridSize))
-        localStorage.setItem('pocketboard-guides-visible', String(guidesVisible))
-        localStorage.setItem('pocketboard-guides', JSON.stringify(canvasGuides))
-        setSavingState('Saved')
-      } catch {
-        setSavingState('Not saved')
-        if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
-        setToast('Device storage is full. Export a project backup.')
-      }
-    }, 500)
-    return () => window.clearTimeout(timer)
-  }, [layers, documentMeta, projectName, activeArtboardId, artboards, gridVisible, gridSize, guidesVisible, canvasGuides])
+    saveTimerRef.current = window.setTimeout(() => { persistDocument(); saveTimerRef.current = null }, 500)
+    return () => { if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current) }
+  }, [layers, persistDocument])
 
   const showToast = useCallback((message: string) => {
     setToast(message)
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current)
     toastTimerRef.current = window.setTimeout(() => setToast(null), 1600)
   }, [])
+
+  const saveNow = useCallback(() => {
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = null
+    if (persistDocument()) showToast('Saved on this device')
+  }, [persistDocument, showToast])
+
+  useEffect(() => {
+    const onSaveShortcut = (event: KeyboardEvent) => {
+      if (view !== 'editor' || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return
+      event.preventDefault()
+      event.stopPropagation()
+      saveNow()
+    }
+    window.addEventListener('keydown', onSaveShortcut, true)
+    return () => window.removeEventListener('keydown', onSaveShortcut, true)
+  }, [view, saveNow])
+
+  const extractSelectedPalette = async () => {
+    if (colorPickRef.current) cancelColorPick(false)
+    const image = layersRef.current.find((layer) => layer.id === selectedId && layer.type === 'image')
+    if (!image?.src || extractingPalette) return
+    const request = ++paletteRequestRef.current
+    const board = activeArtboardId
+    setExtractingPalette(true)
+    try {
+      const colors = await extractImagePalette(image.src)
+      if (request !== paletteRequestRef.current || selectedIdRef.current !== image.id || activeArtboardRef.current !== board) return
+      const palette = { name: image.name, colors }
+      try { localStorage.setItem('pocketboard-image-palette', JSON.stringify(palette)) }
+      catch { showToast('Palette could not be saved on this device'); return }
+      setImagePalette(palette)
+      if (isCompact) setMobileSheet('properties')
+      showToast('Image palette extracted')
+    } catch {
+      if (request === paletteRequestRef.current && selectedIdRef.current === image.id && activeArtboardRef.current === board) showToast('Unable to extract colours from this image')
+    } finally { if (request === paletteRequestRef.current) setExtractingPalette(false) }
+  }
+
+  const cancelColorPick = useCallback((reopen = true) => {
+    const current = colorPickRef.current
+    colorPickRef.current = null
+    colorPickBusyRef.current = false
+    setColorPick(null)
+    if (reopen && current?.reopen) setMobileSheet('properties')
+  }, [])
+
+  const startColorPick = (apply: (color: string) => void) => {
+    const target = { apply, layerId: selectedId, artboardId: activeArtboardId, tool: activeTool, reopen: mobileSheet === 'properties' }
+    colorPickRef.current = target
+    setColorPick(target)
+    setMobileSheet(null)
+    finishTextEditing()
+    window.requestAnimationFrame(() => artboardRef.current?.focus({ preventScroll: true }))
+  }
+
+  useEffect(() => {
+    const target = colorPickRef.current
+    if (target && (target.layerId !== selectedId || target.artboardId !== activeArtboardId || target.tool !== activeTool || view !== 'editor')) cancelColorPick(false)
+  }, [selectedId, activeArtboardId, activeTool, view, cancelColorPick])
+
+  useEffect(() => {
+    if (!colorPick) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); cancelColorPick() }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [colorPick, cancelColorPick])
+
+  const pickCanvasColor = async (point: Point) => {
+    const target = colorPickRef.current
+    if (!target || colorPickBusyRef.current) return
+    colorPickBusyRef.current = true
+    try {
+      const color = await sampleArtboardColor(cloneLayers(layersRef.current), documentMeta, point)
+      if (colorPickRef.current !== target) return
+      target.apply(color)
+      cancelColorPick()
+    } catch {
+      if (colorPickRef.current === target) {
+        cancelColorPick()
+        showToast('Unable to sample this canvas. Check image access and try again.')
+      }
+    } finally { if (colorPickRef.current === target) colorPickBusyRef.current = false }
+  }
 
   const navigate = (nextView: View) => {
     setView(nextView)
@@ -648,8 +755,8 @@ function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable
-      if (editing) return
       const command = event.metaKey || event.ctrlKey
+      if (editing) return
       if (command && event.key.toLowerCase() === 'n') {
         event.preventDefault()
         setView('new')
@@ -819,6 +926,7 @@ function App() {
     else if (action === 'shapes') setMobileSheet('shapes')
     else if (action === 'text') { setSelectedId(null); setActiveTool('text') }
     else if (action === 'image') imageInputRef.current?.click()
+    else if (action === 'extract-palette') { setMobileSheet('properties'); void extractSelectedPalette() }
     else if (action === 'layers') setMobileSheet('layers')
     else if (action === 'more') setMobileSheet('more')
     else if (action === 'properties' || action === 'align' || action === 'arrange') setMobileSheet('properties')
@@ -855,6 +963,7 @@ function App() {
         renaming={renaming}
         setRenaming={setRenaming}
         savingState={savingState}
+        onSave={saveNow}
         canUndo={past.length > 0}
         canRedo={future.length > 0}
         onUndo={undo}
@@ -869,6 +978,7 @@ function App() {
 
       <EditorMenu
         onNew={() => navigate('new')}
+        onSave={saveNow}
         onImport={() => imageInputRef.current?.click()}
         onExport={() => setExportOpen(true)}
         onUndo={undo} onRedo={redo} canUndo={past.length > 0} canRedo={future.length > 0}
@@ -935,6 +1045,7 @@ function App() {
             void importImages(Array.from(event.dataTransfer.files), point)
           }}>
           {draggingFiles && <div className="import-drop-hint">Drop images to import</div>}
+          {colorPick && <div className="color-pick-banner" role="status"><span>Tap the artboard to pick a colour</span><button onClick={() => cancelColorPick()}>Cancel</button></div>}
           <ArtboardBar
             artboards={syncedArtboards}
             activeId={activeArtboardId}
@@ -959,6 +1070,8 @@ function App() {
             editingTextId={editingTextId}
             maskBrushMode={maskBrushMode}
             maskBrushSize={maskBrushSize}
+            pickingColor={Boolean(colorPick)}
+            onPickColor={pickCanvasColor}
             onSelect={(id) => {
               if (id !== editingTextId) finishTextEditing()
               setSelectedId(id)
@@ -1008,11 +1121,15 @@ function App() {
           />
         </main>
 
-        <aside className="properties-panel desktop-panel" aria-label="Properties panel">
+        <aside className="properties-panel desktop-panel" aria-label="Properties panel" onPointerDownCapture={() => { if (colorPick) cancelColorPick(false) }} onKeyDownCapture={() => { if (colorPick) cancelColorPick(false) }}>
           <PropertiesPanel
             selected={selected}
             documentMeta={documentMeta}
             onUpdate={(patch) => selected && updateLayer(selected.id, patch)}
+            onPickColor={startColorPick}
+            imagePalette={imagePalette}
+            extractingPalette={extractingPalette}
+            onExtractPalette={() => void extractSelectedPalette()}
             onUpdateDocument={(patch) => setDocumentMeta((current) => ({ ...current, ...patch }))}
             onDelete={deleteSelected}
             onDuplicate={duplicateSelected}
@@ -1070,6 +1187,10 @@ function App() {
               selected={selected}
               documentMeta={documentMeta}
               onUpdate={(patch) => selected && updateLayer(selected.id, patch)}
+              onPickColor={startColorPick}
+              imagePalette={imagePalette}
+              extractingPalette={extractingPalette}
+              onExtractPalette={() => void extractSelectedPalette()}
               onUpdateDocument={(patch) => setDocumentMeta((current) => ({ ...current, ...patch }))}
               onDelete={deleteSelected}
               onDuplicate={duplicateSelected}
@@ -1160,6 +1281,7 @@ interface TopBarProps {
   renaming: boolean
   setRenaming: (value: boolean) => void
   savingState: 'Saving' | 'Saved' | 'Not saved'
+  onSave: () => void
   canUndo: boolean
   canRedo: boolean
   onUndo: () => void
@@ -1211,6 +1333,7 @@ function TopBar(props: TopBarProps) {
         </div>
       </div>
       <div className="topbar-actions">
+        <button className="button secondary save-button" aria-label="Save design" title="Save on this device · Ctrl S" onClick={props.onSave}><Save size={17} /><span>Save</span></button>
         <IconButton className="theme-button" label={props.theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={props.onToggleTheme}>
           {props.theme === 'light' ? <Moon /> : <Sun />}
         </IconButton>
@@ -1222,7 +1345,7 @@ function TopBar(props: TopBarProps) {
 }
 
 type EditorMenuProps = {
-  onNew: () => void; onImport: () => void; onExport: () => void
+  onNew: () => void; onSave: () => void; onImport: () => void; onExport: () => void
   onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean
   onDuplicate: () => void; onDelete: () => void; hasSelection: boolean
   onDeselect: () => void; onSelectTool: () => void; onObjectSelect: () => void
@@ -1245,6 +1368,7 @@ function EditorMenu(props: EditorMenuProps) {
   const groups = [
     { name: 'File', items: [
       { label: 'New design', action: props.onNew },
+      { label: 'Save', action: props.onSave },
       { label: 'Import from device', action: props.onImport },
       { label: 'Export', action: props.onExport },
     ] },
@@ -1559,6 +1683,8 @@ interface CanvasProps {
   editingTextId: string | null
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
+  pickingColor: boolean
+  onPickColor: (point: Point) => void
   onSelect: (id: string | null) => void
   onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => string
   onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
@@ -1626,6 +1752,14 @@ function Canvas(props: CanvasProps) {
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
   const [isPinching, setIsPinching] = useState(false)
+  const pickGestureRef = useRef<{ pointerId: number; x: number; y: number } | null>(null)
+  const [pickCursor, setPickCursor] = useState<Point>({ x: props.documentMeta.width / 2, y: props.documentMeta.height / 2 })
+  useEffect(() => {
+    if (props.pickingColor) {
+      lastTextTapRef.current = null
+      setPickCursor({ x: props.documentMeta.width / 2, y: props.documentMeta.height / 2 })
+    }
+  }, [props.pickingColor, props.documentMeta.width, props.documentMeta.height])
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
   const draftPointsRef = useRef<Point[]>([])
   zoomRef.current = props.zoom
@@ -1750,6 +1884,7 @@ function Canvas(props: CanvasProps) {
     try { event.currentTarget.setPointerCapture(event.pointerId) } catch { /* pointer capture is best-effort on older mobile browsers */ }
 
     if (pointers.size < 2 || pinchRef.current) return
+    pickGestureRef.current = null
     const entries = [...pointers.entries()].slice(0, 2) as [[number, Point], [number, Point]]
     const [[firstId, first], [secondId, second]] = entries
     const svg = props.artboardRef.current
@@ -1806,6 +1941,14 @@ function Canvas(props: CanvasProps) {
   }
 
   const finishCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const gesture = pickGestureRef.current
+    if (gesture?.pointerId === event.pointerId) {
+      pickGestureRef.current = null
+      const rect = props.artboardRef.current?.getBoundingClientRect()
+      if (props.pickingColor && event.type === 'pointerup' && !pinchRef.current && rect && Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) < 10 && event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom) {
+        props.onPickColor(pointerToCanvas(event.clientX, event.clientY))
+      }
+    }
     if (event.pointerType !== 'touch') return
     touchPointersRef.current.delete(event.pointerId)
     if (pinchRef.current?.pointerIds.includes(event.pointerId)) {
@@ -2202,10 +2345,17 @@ function Canvas(props: CanvasProps) {
   const compactVerticalSpace = compactLandscape ? 178 : 292
   const fitWidth = Math.max(120, Math.min(510, (viewport.height - (compactLayout ? compactVerticalSpace : 200)) * aspect, compactLayout ? viewport.width - 42 : canvasWidth - 96))
   const fitHeight = fitWidth / aspect
+  const overflow = Math.max(props.documentMeta.width, props.documentMeta.height, ...props.layers.map((layer) => Math.max(Math.abs(layer.x), Math.abs(layer.y)) + Math.hypot(layer.width, layer.height) + Math.abs(layer.strokeWidth))) * 2 + 100
+  const outsidePath = `M ${-overflow} ${-overflow} H ${props.documentMeta.width + overflow} V ${props.documentMeta.height + overflow} H ${-overflow} Z M 0 0 H ${props.documentMeta.width} V ${props.documentMeta.height} H 0 Z`
+  const visibleLayers = props.layers.filter((layer) => layer.visible)
+  const renderLayers = () => visibleLayers.map((layer) => (
+    <LayerElement key={layer.id} layer={layer} editing={props.editingTextId === layer.id}
+      onPointerDown={(event) => onLayerPointerDown(event, layer)} onDoubleClick={(event) => onLayerDoubleClick(event, layer)} />
+  ))
   return (
     <div
       ref={scrollRef}
-      className={`canvas-scroll ${isPinching ? 'is-pinching' : ''}`}
+      className={`canvas-scroll ${isPinching ? 'is-pinching' : ''} ${props.pickingColor ? 'is-picking-color' : ''}`}
       onPointerDownCapture={onCanvasPointerDownCapture}
       onPointerDown={onCanvasSurfacePointerDown}
       onPointerMoveCapture={onCanvasPointerMoveCapture}
@@ -2219,9 +2369,28 @@ function Canvas(props: CanvasProps) {
           ref={props.artboardRef}
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
-          role="img"
-          aria-label={`Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
-          onPointerDownCapture={startArtboardLongPress}
+          role={props.pickingColor ? 'application' : 'img'}
+          tabIndex={props.pickingColor ? 0 : undefined}
+          aria-label={props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          onKeyDown={(event) => {
+            if (!props.pickingColor) return
+            const step = event.shiftKey ? 10 : 1
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); props.onPickColor(pickCursor); return }
+            if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
+            event.preventDefault()
+            event.stopPropagation()
+            setPickCursor((point) => ({
+              x: clamp(point.x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0), 0, props.documentMeta.width - 1),
+              y: clamp(point.y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0), 0, props.documentMeta.height - 1),
+            }))
+          }}
+          onPointerDownCapture={(event) => {
+            if (!props.pickingColor) { startArtboardLongPress(event); return }
+            if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
+            event.preventDefault()
+            event.stopPropagation()
+            pickGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+          }}
           onPointerDown={onBackgroundPointerDown}
         >
           <rect width={props.documentMeta.width} height={props.documentMeta.height} fill={props.documentMeta.background} data-artboard-background="true" />
@@ -2229,17 +2398,13 @@ function Canvas(props: CanvasProps) {
             <pattern id="canvas-grid-pattern" width={props.gridSize} height={props.gridSize} patternUnits="userSpaceOnUse">
               <path d={`M ${props.gridSize} 0 L 0 0 0 ${props.gridSize}`} fill="none" stroke="currentColor" strokeWidth="1" vectorEffect="non-scaling-stroke" />
             </pattern>
+            <clipPath id="artboard-inside"><rect width={props.documentMeta.width} height={props.documentMeta.height} /></clipPath>
+            <clipPath id="artboard-outside"><path d={outsidePath} clipRule="evenodd" /></clipPath>
             {props.layers.map((layer) => <LayerDefinition key={layer.id} layer={layer} />)}
           </defs>
-          {props.layers.filter((layer) => layer.visible).map((layer) => (
-            <LayerElement
-              key={layer.id}
-              layer={layer}
-              editing={props.editingTextId === layer.id}
-              onPointerDown={(event) => onLayerPointerDown(event, layer)}
-              onDoubleClick={(event) => onLayerDoubleClick(event, layer)}
-            />
-          ))}
+          <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
+          <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
+          {props.pickingColor && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
             ? <line key={guide.id} className="user-guide guide-x" x1={guide.position} x2={guide.position} y1="0" y2={props.documentMeta.height} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />
@@ -2767,6 +2932,10 @@ interface PropertiesPanelProps {
   selected: DesignLayer | null
   documentMeta: DesignDocument
   onUpdate: (patch: Partial<DesignLayer>) => void
+  onPickColor: (apply: (color: string) => void) => void
+  imagePalette: { name: string; colors: string[] } | null
+  extractingPalette: boolean
+  onExtractPalette: () => void
   onUpdateDocument: (patch: Partial<DesignDocument>) => void
   onDelete: () => void
   onDuplicate: () => void
@@ -2800,7 +2969,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
             <NumberInput label="W" value={props.documentMeta.width} unit="px" onChange={(value) => props.onUpdateDocument({ width: value })} />
             <NumberInput label="H" value={props.documentMeta.height} unit="px" onChange={(value) => props.onUpdateDocument({ height: value })} />
           </div>
-          <ColorInput label="Background" value={props.documentMeta.background} onChange={(value) => props.onUpdateDocument({ background: value })} />
+          <ColorInput onPickColor={props.onPickColor} label="Background" value={props.documentMeta.background} onChange={(value) => props.onUpdateDocument({ background: value })} />
         </PropertySection>
         <PropertySection title="Canvas">
           <SettingRow icon={<Grid3X3 size={17} />} label="Layout grid" value={props.gridVisible ? 'On' : 'Off'} active={props.gridVisible} onClick={props.onToggleGrid} />
@@ -2811,6 +2980,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         </PropertySection>
         <PropertySection title="Document colours">
           <ColourPalette value={props.documentMeta.background} onChange={(background) => props.onUpdateDocument({ background })} />
+          {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={props.documentMeta.background} onChange={(background) => props.onUpdateDocument({ background })} /></>}
         </PropertySection>
         <div className="panel-note"><Lock size={16} /><p>Designs and artboards are saved to this device automatically.</p></div>
       </div>
@@ -2872,6 +3042,12 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           {((layer.shapeKind || 'regular') === 'regular' || layer.shapeKind === 'diamond' || layer.shapeKind === 'starburst') && <><SliderField label="Corner radius" value={round(layer.radius || 0)} min={0} max={round(Math.min(layer.width, layer.height) / 3)} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
         </PropertySection>
       )}
+
+      {layer.type === 'image' && <PropertySection title="Image palette">
+        <button className="button secondary full-button" disabled={props.extractingPalette || !layer.src} onClick={props.onExtractPalette}><Palette size={16} />{props.extractingPalette ? 'Extracting…' : 'Extract palette from image'}</button>
+        {props.imagePalette && <ImagePalettePreview palette={props.imagePalette} />}
+        <small className="palette-note">Colours are extracted from the original image on this device.</small>
+      </PropertySection>}
 
       <PropertySection title="Position" actions={<button className={`link-toggle ${linked ? 'active' : ''}`} onClick={() => setLinked(!linked)} aria-label="Lock proportions"><Link2 size={14} /></button>}>
         <div className="dimension-pair">
@@ -2943,7 +3119,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       {layer.type !== 'image' && layer.type !== 'line' && layer.type !== 'brush' && (
         <PropertySection title="Fill">
-          <FillEditor layer={layer} onUpdate={props.onUpdate} />
+          <FillEditor layer={layer} onUpdate={props.onUpdate} onPickColor={props.onPickColor} imagePalette={props.imagePalette} />
         </PropertySection>
       )}
 
@@ -2951,7 +3127,8 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       {(['rectangle', 'ellipse', 'polygon', 'star', 'line', 'path', 'brush'] as LayerType[]).includes(layer.type) && (
         <PropertySection title={layer.type === 'brush' ? 'Brush' : 'Stroke'} optional={layer.type !== 'brush'}>
-          <ColorInput label="Colour" value={layer.stroke === 'transparent' ? '#18181B' : layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeWidth: layer.strokeWidth || 1 })} />
+          <ColorInput onPickColor={props.onPickColor} label="Stroke" value={layer.stroke === 'transparent' ? '#18181B' : layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeWidth: layer.strokeWidth || 1 })} />
+          {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeWidth: layer.strokeWidth || 1 })} /></>}
           {layer.type === 'brush'
             ? <><SliderField label="Brush size" value={layer.strokeWidth} min={1} max={120} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} /><SliderField label="Smoothing" value={round((layer.smoothing || .5) * 100)} min={0} max={100} unit="%" onChange={(value) => props.onUpdate({ smoothing: value / 100 })} /></>
             : <NumberInput label="Width" value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} />}
@@ -2991,7 +3168,7 @@ function NumberInput({ label, value, unit, step = 1, onChange }: { label: ReactN
   )
 }
 
-function FillEditor({ layer, onUpdate }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void }) {
+function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void; onPickColor: (apply: (color: string) => void) => void; imagePalette: { name: string; colors: string[] } | null }) {
   const fillType = layer.fillType || 'solid'
   const gradient = layer.gradient || { ...DEFAULT_GRADIENT, stops: DEFAULT_GRADIENT.stops.map((stop) => ({ ...stop })) }
   const setFillType = (type: 'solid' | 'linear' | 'radial') => {
@@ -3001,38 +3178,37 @@ function FillEditor({ layer, onUpdate }: { layer: DesignLayer; onUpdate: (patch:
   const setStop = (index: number, color: string) => {
     onUpdate({ fillType, gradient: { ...gradient, stops: gradient.stops.map((stop, stopIndex) => stopIndex === index ? { ...stop, color } : stop) } })
   }
-  const pickFromScreen = async () => {
-    const EyeDropperClass = (window as unknown as { EyeDropper?: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper
-    if (!EyeDropperClass) return
-    try {
-      const result = await new EyeDropperClass().open()
-      if (fillType === 'solid') onUpdate({ fill: result.sRGBHex })
-      else setStop(0, result.sRGBHex)
-    } catch { /* the picker was cancelled */ }
-  }
   return (
     <div className="fill-editor">
       <div className="segmented fill-type-control" aria-label="Fill type">
         {(['solid', 'linear', 'radial'] as const).map((type) => <button key={type} className={fillType === type ? 'selected' : ''} onClick={() => setFillType(type)}>{type === 'solid' ? 'Solid' : type === 'linear' ? 'Linear' : 'Radial'}</button>)}
       </div>
       {fillType === 'solid'
-        ? <ColorInput label="Colour" value={layer.fill} onChange={(fill) => onUpdate({ fill, fillType: 'solid' })} />
+        ? <ColorInput onPickColor={onPickColor} label="Fill" value={layer.fill} onChange={(fill) => onUpdate({ fill, fillType: 'solid' })} />
         : <>
           <div className="gradient-preview" style={{ background: gradient.type === 'radial' ? `radial-gradient(circle, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` : `linear-gradient(${gradient.angle}deg, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` }} />
-          <div className="gradient-stops">{gradient.stops.map((stop, index) => <ColorInput key={index} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} />)}</div>
+          <div className="gradient-stops">{gradient.stops.map((stop, index) => <div key={index}><ColorInput onPickColor={onPickColor} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} />{imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={stop.color} onChange={(color) => setStop(index, color)} /></>}</div>)}</div>
           {gradient.type === 'linear' && <SliderField label="Angle" value={gradient.angle} min={0} max={360} unit="°" onChange={(angle) => onUpdate({ gradient: { ...gradient, angle } })} />}
         </>}
-      <div className="palette-heading"><span>Document colours</span><button onClick={pickFromScreen} disabled={!('EyeDropper' in window)} title="Pick a colour from the screen"><Pipette size={14} /></button></div>
+      {imagePalette && fillType === 'solid' && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={layer.fill} onChange={(color) => onUpdate({ fill: color })} /></>}
+      <div className="palette-heading"><span>Document colours</span></div>
       <ColourPalette value={fillType === 'solid' ? layer.fill : gradient.stops[0].color} onChange={(color) => fillType === 'solid' ? onUpdate({ fill: color }) : setStop(0, color)} />
     </div>
   )
 }
 
-function ColourPalette({ value, onChange }: { value: string; onChange: (colour: string) => void }) {
-  return <div className="colour-palette">{DOCUMENT_COLOURS.map((colour) => <button key={colour} className={normalizeColor(value).toLowerCase() === colour.toLowerCase() ? 'selected' : ''} style={{ background: colour }} onClick={() => onChange(colour)} aria-label={`Use ${colour}`}>{normalizeColor(value).toLowerCase() === colour.toLowerCase() && <Check size={11} />}</button>)}</div>
+function ColourPalette({ value, onChange, colors = DOCUMENT_COLOURS }: { value: string; onChange: (colour: string) => void; colors?: string[] }) {
+  return <div className="colour-palette">{colors.map((colour) => <button key={colour} className={normalizeColor(value).toLowerCase() === colour.toLowerCase() ? 'selected' : ''} style={{ background: colour }} onClick={() => onChange(colour)} aria-label={`Use ${colour}`}>{normalizeColor(value).toLowerCase() === colour.toLowerCase() && <Check size={11} />}</button>)}</div>
 }
 
-function ColorInput({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function ImagePalettePreview({ palette }: { palette: { name: string; colors: string[] } }) {
+  return <div className="image-palette-preview" aria-label={`Palette from ${palette.name}`}>
+    <span>From {palette.name}</span>
+    <div>{palette.colors.map((color) => <div key={color}><span style={{ background: color }} /><code>{color}</code></div>)}</div>
+  </div>
+}
+
+function ColorInput({ label, value, onChange, onPickColor }: { label: string; value: string; onChange: (value: string) => void; onPickColor: (apply: (color: string) => void) => void }) {
   const colour = normalizeColor(value)
   return (
     <div className="color-field">
@@ -3044,6 +3220,7 @@ function ColorInput({ label, value, onChange }: { label: string; value: string; 
         const next = event.target.value
         if (/^#[0-9A-Fa-f]{6}$/.test(next)) onChange(next)
       }} aria-label={`${label} hex value`} />
+      <button type="button" className="color-pick-button" aria-label={`Pick ${label.toLowerCase()} colour from canvas`} title="Pick colour from canvas" onClick={() => onPickColor(onChange)}><Pipette size={16} /></button>
     </div>
   )
 }
@@ -3077,7 +3254,7 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
 
 type MobileToolAction =
   | 'select' | 'object-select' | 'mask-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
-  | 'properties' | 'edit-text' | 'finish-text' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
+  | 'properties' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
 function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAction }: {
@@ -3115,6 +3292,7 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
       ]
     } else if (selected.type === 'image') {
       items = [
+        { label: 'Palette', icon: <Palette />, action: 'extract-palette' },
         { label: 'Mask brush', icon: <Brush />, action: 'mask-brush' },
         { label: 'Crop', icon: <Crop />, action: 'crop', active: activeTool === 'crop' },
         { label: 'Mask shape', icon: <Spline />, action: 'shape-mask' },
@@ -3469,6 +3647,33 @@ async function exportDesign(options: ExportOptions) {
   const mime = options.format === 'JPG' ? 'image/jpeg' : 'image/png'
   const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error('Export failed')), mime, options.quality / 100))
   downloadBlob(blob, `${safeName}.${options.format.toLowerCase()}`)
+}
+
+async function sampleArtboardColor(layers: DesignLayer[], meta: DesignDocument, point: Point): Promise<string> {
+  // Render the same artwork as export, without selection handles, rulers or grid.
+  const embedded = await Promise.all(layers.map(async (layer) => {
+    if (layer.type !== 'image' || !layer.src || layer.src.startsWith('data:')) return layer
+    return { ...layer, src: await imageToDataUrl(layer.src) }
+  }))
+  await document.fonts.ready
+  const svg = buildSvg(embedded, meta, true)
+  const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+  try {
+    const image = new Image()
+    image.src = url
+    await image.decode()
+    const scale = Math.min(1, 4096 / Math.max(meta.width, meta.height), Math.sqrt(16_000_000 / (meta.width * meta.height)))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(meta.width * scale))
+    canvas.height = Math.max(1, Math.round(meta.height * scale))
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })
+    if (!ctx) throw new Error('Canvas unavailable')
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+    const x = clamp(Math.floor(point.x / meta.width * canvas.width), 0, canvas.width - 1)
+    const y = clamp(Math.floor(point.y / meta.height * canvas.height), 0, canvas.height - 1)
+    const pixel = ctx.getImageData(x, y, 1, 1).data
+    return `#${Array.from(pixel.slice(0, 3), (value) => value.toString(16).padStart(2, '0')).join('')}`
+  } finally { URL.revokeObjectURL(url) }
 }
 
 function downloadBlob(blob: Blob, name: string) {
