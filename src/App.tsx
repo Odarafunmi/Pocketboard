@@ -33,6 +33,7 @@ import {
   Hexagon,
   Image as ImageIcon,
   Layers3,
+  LassoSelect,
   LayoutGrid,
   Link2,
   Lock,
@@ -68,6 +69,7 @@ import {
   Undo2,
   Unlock,
   Upload,
+  WandSparkles,
   X,
   ZoomIn,
   ZoomOut,
@@ -90,6 +92,7 @@ import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './da
 import { textLines } from './textLayout'
 import { extractImagePalette } from './imagePalette'
 import { magicWandMask } from './selectionMask'
+import { downloadOnlineFont, ensureFont, ensureLayerFonts, fontFromBlob, getLocalFonts, listSavedFonts, saveFont, searchOnlineFonts, type LocalFont, type OnlineFont } from './fonts'
 import { presetShapePath, shapeCategories } from './shapePresets'
 import type {
   ArtboardSnapshot,
@@ -106,6 +109,7 @@ import type {
   MobileSheet,
   Point,
   Theme,
+  StoredFont,
   Tool,
   View,
 } from './types'
@@ -184,6 +188,17 @@ function App() {
       return cloneLayers(sampleLayers)
     }
   })
+  const [, setFontRevision] = useState(0)
+  const activatedFontsRef = useRef(new Set<string>())
+  useEffect(() => {
+    const pending = layers.filter((layer) => layer.fontFamily && layer.fontAssets?.length && !activatedFontsRef.current.has(layer.fontFamily))
+    if (!pending.length) return
+    pending.forEach((layer) => activatedFontsRef.current.add(layer.fontFamily!))
+    void ensureLayerFonts(pending).then(() => setFontRevision((revision) => revision + 1)).catch((error) => {
+      console.error('Could not load a project font', error)
+      pending.forEach((layer) => activatedFontsRef.current.delete(layer.fontFamily!))
+    })
+  }, [layers])
   const [projectName, setProjectName] = useState(() => localStorage.getItem('pocketboard-project-name') || 'Objects & Space')
   const [selectedId, setSelectedId] = useState<string | null>(() => {
     const stored = localStorage.getItem('pocketboard-layers')
@@ -546,7 +561,7 @@ function App() {
 
   const activateSelection = (tool: 'polygon-mask' | 'wand-mask') => {
     const target = layersRef.current.find((layer) => layer.id === selectedId)
-    if (!target || target.type !== 'image') { showToast('Select an image to mask.'); return }
+    if (!target || target.type !== 'image') { setActiveTool('object-select'); setMobileSheet(null); showToast('Select an image, then choose a selection tool.'); return }
     if (target.locked) { showToast('Unlock the image before masking.'); return }
     finishTextEditing()
     setActiveTool(tool)
@@ -964,7 +979,8 @@ function App() {
     } else if (action === 'object-select') {
       finishTextEditing()
       setActiveTool('object-select')
-    } else if (action === 'mask-brush') activateMaskBrush()
+    } else if (action === 'polygon-mask' || action === 'wand-mask') activateSelection(action)
+    else if (action === 'mask-brush') activateMaskBrush()
     else if (action === 'shapes') setMobileSheet('shapes')
     else if (action === 'text') { setSelectedId(null); setActiveTool('text') }
     else if (action === 'image') imageInputRef.current?.click()
@@ -1153,6 +1169,8 @@ function App() {
               maskBrushSize={maskBrushSize}
               onOpenProperties={() => setMobileSheet('properties')}
               onOpenMask={() => setMobileSheet('mask')}
+              onPolygonMask={() => activateSelection('polygon-mask')}
+              onWandMask={() => activateSelection('wand-mask')}
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
               onDoneTool={() => setActiveTool('select')}
@@ -1305,6 +1323,7 @@ function App() {
                 else if (action === 'mouse') { setMobileSheet('mouse'); return }
                 else if (action === 'settings') { setMobileSheet('properties'); return }
                 else if (action === 'brush') { activateMaskBrush(); return }
+                else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner') setActiveTool(action)
                 setMobileSheet(null)
               }}
@@ -1512,8 +1531,8 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'brush', label: 'Mask brush', shortcut: 'B', icon: <Brush /> },
-    { id: 'polygon-mask', label: 'Polygonal mask selection', icon: <Hexagon /> },
-    { id: 'wand-mask', label: 'Magic wand mask selection', icon: <Sparkles /> },
+    { id: 'polygon-mask', label: 'Polygonal selection', icon: <LassoSelect /> },
+    { id: 'wand-mask', label: 'Magic wand', icon: <WandSparkles /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'text', label: 'Text', shortcut: 'T', icon: <Type />, divider: true },
     { id: 'image', label: 'Place image', icon: <ImageIcon /> },
@@ -3138,13 +3157,15 @@ function ZoomControl({ zoom, onZoomOut, onZoomIn, onFit }: { zoom: number; onZoo
   )
 }
 
-function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpenProperties, onOpenMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
+function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpenProperties, onOpenMask, onPolygonMask, onWandMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
   selected: DesignLayer
   activeTool: Tool
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
   onOpenProperties: () => void
   onOpenMask: () => void
+  onPolygonMask: () => void
+  onWandMask: () => void
   onDuplicate: () => void
   onDelete: () => void
   onDoneTool: () => void
@@ -3169,7 +3190,11 @@ function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpen
     <div className={`context-bar ${focusedMode ? 'focused' : ''}`} aria-label="Selection actions">
       {focusedMode && <button className="context-item context-done" onClick={onDoneTool}><Check size={17} /><span>Done</span></button>}
       <button className="context-item" onClick={onOpenProperties}><SlidersHorizontal size={17} /><span>Edit</span></button>
-      {selected.type === 'image' && <button className="context-item mask-context-item" onClick={onOpenMask}><Crop size={17} /><span>Crop / mask</span></button>}
+      {selected.type === 'image' && <>
+        <button className="context-item" onClick={onPolygonMask}><LassoSelect size={17} /><span>Polygonal</span></button>
+        <button className="context-item" onClick={onWandMask}><WandSparkles size={17} /><span>Magic wand</span></button>
+        <button className="context-item mask-context-item" onClick={onOpenMask}><Crop size={17} /><span>Crop / mask</span></button>
+      </>}
       {selected.type !== 'image' && (
         <label className="context-item color-context">
           <span className="mini-swatch" style={{ background: selected.fillType !== 'solid' && selected.gradient ? `linear-gradient(${selected.gradient.angle}deg, ${selected.gradient.stops.map((stop) => stop.color).join(', ')})` : selected.fill }} />
@@ -3299,8 +3324,8 @@ function PropertiesPanel(props: PropertiesPanelProps) {
       )}
 
       {layer.type === 'image' && <PropertySection title="Selection masks">
-        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('polygon-mask')}><Hexagon size={16} /> Polygonal selection</button>
-        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('wand-mask')}><Sparkles size={16} /> Magic wand selection</button>
+        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('polygon-mask')}><LassoSelect size={16} /> Polygonal selection</button>
+        <button className="button secondary full-button" disabled={layer.locked} onClick={() => props.onActivateTool('wand-mask')}><WandSparkles size={16} /> Magic wand selection</button>
         {Boolean(layer.maskSelections?.length) && <button className="button secondary full-button" onClick={() => props.onUpdate({ maskSelections: [] })}>Clear selection masks</button>}
       </PropertySection>}
 
@@ -3360,7 +3385,14 @@ function PropertiesPanel(props: PropertiesPanelProps) {
 
       {layer.type === 'text' && (
         <PropertySection title="Typography">
-          <SelectField label="Font" value={layer.fontFamily || 'Inter'} options={['Inter', 'Arial', 'Georgia', 'Times New Roman']} onChange={(fontFamily) => props.onUpdate({ fontFamily })} />
+          <FontPicker key={layer.id} layer={layer} onUpdate={props.onUpdate} />
+          <div className="case-controls" aria-label="Change text case">
+            {(['uppercase', 'lowercase'] as const).map((mode) => <button key={mode} type="button" className="button secondary" onClick={() => {
+              const text = mode === 'uppercase' ? (layer.text || '').toUpperCase() : (layer.text || '').toLowerCase()
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, text }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              props.onUpdate({ text, height })
+            }}>{mode === 'uppercase' ? 'UPPERCASE' : 'lowercase'}</button>)}
+          </div>
           <div className="dimension-pair">
             <SelectField compact label="Weight" value={String(layer.fontWeight || 400)} options={['400', '500', '600', '700']} onChange={(value) => props.onUpdate({ fontWeight: Number(value) })} />
             <NumberInput label="Size" value={layer.fontSize || 16} unit="px" onChange={(fontSize) => props.onUpdate({ fontSize })} />
@@ -3418,6 +3450,92 @@ function PropertiesPanel(props: PropertiesPanelProps) {
       {props.insideSheet && <button className="button destructive-text full-button" onClick={props.onDelete}><Trash2 size={17} /> Delete layer</button>}
     </div>
   )
+}
+
+function FontPicker({ layer, onUpdate }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void }) {
+  const [saved, setSaved] = useState<StoredFont[]>([])
+  const [installedSearch, setInstalledSearch] = useState('')
+  const [localFonts, setLocalFonts] = useState<LocalFont[]>([])
+  const [deviceSearch, setDeviceSearch] = useState('')
+  const [onlineSearch, setOnlineSearch] = useState('')
+  const [online, setOnline] = useState<OnlineFont[]>([])
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('')
+  const [deviceLoaded, setDeviceLoaded] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
+  const aliveRef = useRef(true)
+  useEffect(() => {
+    aliveRef.current = true
+    const refresh = () => {
+      void listSavedFonts().then((fonts) => { if (aliveRef.current) setSaved(fonts) }).catch(() => { if (aliveRef.current) setStatus('Installed font storage is unavailable on this device.') })
+    }
+    refresh()
+    window.addEventListener('pocketboard-fonts-changed', refresh)
+    return () => { aliveRef.current = false; window.removeEventListener('pocketboard-fonts-changed', refresh) }
+  }, [])
+  const applyFont = (font: StoredFont) => onUpdate({ fontFamily: font.id, fontLabel: font.label, fontAssets: font.assets, fontWeight: 400 })
+  const install = async (operation: () => Promise<StoredFont>) => {
+    setBusy(true); setStatus('')
+    try {
+      const font = await operation()
+      await saveFont(font)
+      window.dispatchEvent(new Event('pocketboard-fonts-changed'))
+      if (!aliveRef.current) return
+      setSaved((fonts) => [...fonts.filter((existing) => existing.id !== font.id), font])
+      applyFont(font)
+      setStatus(`${font.label} installed in Pocketboard.`)
+    } catch (error) { if (aliveRef.current) setStatus(error instanceof Error && error.message ? error.message : 'Could not install the font.') }
+    finally { if (aliveRef.current) setBusy(false) }
+  }
+  const importFile = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (file) void install(() => fontFromBlob(file, file.name.replace(/\.(ttf|otf|woff2?)$/i, '')))
+  }
+  const deviceMatches = localFonts.filter((font) => `${font.family} ${font.fullName}`.toLocaleLowerCase().includes(deviceSearch.trim().toLocaleLowerCase()))
+  const current = layer.fontFamily || 'Inter'
+  const matches = (name: string) => name.toLocaleLowerCase().includes(installedSearch.trim().toLocaleLowerCase())
+  const savedMatches = saved.filter((font) => matches(font.label) || font.id === current)
+  const baseMatches = ['Inter', 'Arial', 'Georgia', 'Times New Roman'].filter((name) => matches(name) || name === current)
+  const missingCurrent = layer.fontAssets?.length && !saved.some((font) => font.id === current)
+  return <div className="font-picker">
+    <label className="font-search"><span>Search installed fonts</span><input value={installedSearch} onChange={(event) => setInstalledSearch(event.target.value)} placeholder="Search installed fonts" /></label>
+    <label className="font-field"><span>Font</span><select aria-label="Font family" value={current} onChange={(event) => {
+      const value = event.target.value
+      const font = saved.find((item) => item.id === value)
+      if (font) { void ensureFont(font).then(() => { if (aliveRef.current) applyFont(font) }).catch(() => setStatus('Could not load this font.')) }
+      else if (value !== current) onUpdate({ fontFamily: value, fontLabel: undefined, fontAssets: undefined })
+    }}>
+      <optgroup label="Basic fonts">{baseMatches.map((name) => <option key={name} value={name}>{name}</option>)}</optgroup>
+      {missingCurrent && <option value={current}>{layer.fontLabel || 'Project font'}</option>}
+      {savedMatches.length > 0 && <optgroup label="Installed in Pocketboard">{savedMatches.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}</optgroup>}
+    </select></label>
+    <details className="font-manager">
+      <summary>Find and install fonts</summary>
+      <p>Fonts are installed in Pocketboard, not in your operating system. Only use fonts you have rights to use and embed.</p>
+      <button type="button" className="button secondary full-button" disabled={busy} onClick={() => fileRef.current?.click()}><Upload size={15} /> Import font file</button>
+      <input ref={fileRef} className="visually-hidden" type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2" aria-label="Import font file" onChange={importFile} />
+      <button type="button" className="button secondary full-button" disabled={busy} onClick={() => {
+        setBusy(true); setStatus('')
+        void getLocalFonts().then((fonts) => { if (aliveRef.current) { setLocalFonts(fonts); setDeviceLoaded(true); setStatus(`${fonts.length} device font faces found.`) } }).catch((error) => { if (aliveRef.current) setStatus(error instanceof Error && error.message ? error.message : 'Device font access was not granted.') }).finally(() => { if (aliveRef.current) setBusy(false) })
+      }}> {deviceLoaded ? 'Refresh device fonts' : 'Browse device fonts'}</button>
+      <small>Device font access requires permission and a supported browser; refresh after installing fonts on your device.</small>
+      {deviceLoaded && <>
+        <label className="font-search"><span>Search device fonts</span><input value={deviceSearch} onChange={(event) => setDeviceSearch(event.target.value)} placeholder="Search fonts" /></label>
+        <div className="font-results" aria-label="Device font results">{deviceMatches.slice(0, 60).map((font) => <button type="button" key={font.postscriptName} disabled={busy} onClick={() => void install(async () => fontFromBlob(await font.blob(), font.fullName))}><span>{font.fullName}</span><small>Use</small></button>)}{deviceMatches.length > 60 && <small>Showing 60 of {deviceMatches.length}; refine the search.</small>}{deviceMatches.length === 0 && <small>No matching device fonts.</small>}</div>
+      </>}
+      <form className="font-online-search" onSubmit={(event) => {
+        event.preventDefault()
+        if (!onlineSearch.trim()) return
+        setBusy(true); setStatus('')
+        void searchOnlineFonts(onlineSearch.trim()).then((results) => { if (aliveRef.current) { setOnline(results); setStatus(results.length ? `${results.length} fonts found.` : 'No matching online fonts found.') } }).catch(() => { if (aliveRef.current) setStatus('Online search failed. Check your connection and try again.') }).finally(() => { if (aliveRef.current) setBusy(false) })
+      }}><label><span>Search online fonts</span><input value={onlineSearch} onChange={(event) => setOnlineSearch(event.target.value)} placeholder="Font name" /></label><button type="submit" className="button secondary" disabled={busy || !onlineSearch.trim()}>Search</button></form>
+      <small>Online searches and downloads connect to the public npm registry. Fontsource packages provide regular faces; check each font’s licence before use.</small>
+      {online.length > 0 && <div className="font-results" aria-label="Online font results">{online.map((item) => <div key={item.name}><span><strong>{item.label}</strong><small>{item.license} · <a href={`https://www.npmjs.com/package/${item.name}`} target="_blank" rel="noreferrer">Licence details</a></small></span><button type="button" disabled={busy} onClick={() => void install(() => downloadOnlineFont(item))}>Install</button></div>)}</div>}
+      {busy && <small role="status">Working…</small>}
+      {status && <small role="status">{status}</small>}
+    </details>
+  </div>
 }
 
 function PropertySection({ title, actions, children, optional }: { title: string; actions?: ReactNode; children: ReactNode; optional?: boolean }) {
@@ -3581,6 +3699,7 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
 type MobileToolAction =
   | 'select' | 'object-select' | 'mask-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
   | 'properties' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
+  | 'polygon-mask' | 'wand-mask'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
 function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAction }: {
@@ -3618,6 +3737,8 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
       ]
     } else if (selected.type === 'image') {
       items = [
+        { label: 'Polygonal', icon: <LassoSelect />, action: 'polygon-mask', active: activeTool === 'polygon-mask' },
+        { label: 'Magic wand', icon: <WandSparkles />, action: 'wand-mask', active: activeTool === 'wand-mask' },
         { label: 'Palette', icon: <Palette />, action: 'extract-palette' },
         { label: 'Mask brush', icon: <Brush />, action: 'mask-brush' },
         { label: 'Crop', icon: <Crop />, action: 'crop', active: activeTool === 'crop' },
@@ -3787,8 +3908,8 @@ function MaskPanel({ layer, onUpdate, onMoveImage, onBrushMask, onPolygonMask, o
       <div className="mask-choice-grid">{masks.map((item) => <button key={item.id} className={mask === item.id ? 'active' : ''} onClick={() => onUpdate({ mask: item.id })} aria-pressed={mask === item.id}>{item.icon}<span>{item.label}</span>{mask === item.id && <i><Check size={11} /></i>}</button>)}</div>
       <SliderField label="Image scale" value={round((layer.imageScale || 1) * 100)} min={100} max={300} unit="%" onChange={(value) => onUpdate({ imageScale: value / 100 })} />
       <div className="mask-panel-actions">
-        <button className="button secondary full-button" onClick={onPolygonMask}><Hexagon size={17} /> Polygonal selection</button>
-        <button className="button secondary full-button" onClick={onWandMask}><Sparkles size={17} /> Magic wand selection</button>
+        <button className="button secondary full-button" onClick={onPolygonMask}><LassoSelect size={17} /> Polygonal selection</button>
+        <button className="button secondary full-button" onClick={onWandMask}><WandSparkles size={17} /> Magic wand selection</button>
         {Boolean(layer.maskSelections?.length) && <button className="button secondary full-button" onClick={() => onUpdate({ maskSelections: [] })}>Clear selection masks</button>}
         <button className="button primary full-button" onClick={onBrushMask}><Brush size={17} /> Refine with mask brush</button>
         <button className="button secondary full-button" onClick={onMoveImage}><Move size={17} /> Move image inside mask</button>
@@ -3848,6 +3969,8 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
     { id: 'new', label: 'New design', icon: <Plus /> },
     { id: 'object-select', label: 'Object selection', icon: <ScanSearch /> },
+    { id: 'polygon-mask', label: 'Polygonal selection', icon: <LassoSelect /> },
+    { id: 'wand-mask', label: 'Magic wand', icon: <WandSparkles /> },
     { id: 'brush', label: 'Mask brush', icon: <Brush /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
@@ -3882,12 +4005,14 @@ function ExportDialog(props: ExportDialogProps) {
   const [quality, setQuality] = useState(92)
   const [fileName, setFileName] = useState(props.projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'design')
   const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
   const outputWidth = props.documentMeta.width * scale
   const outputHeight = props.documentMeta.height * scale
   const estimatedMb = Math.max(0.2, outputWidth * outputHeight * (format === 'JPG' ? 0.22 : 0.52) / 1_000_000).toFixed(1)
 
   const runExport = async () => {
     setExporting(true)
+    setExportError('')
     try {
       await exportDesign({
         format, scale, transparent, quality, fileName,
@@ -3896,6 +4021,7 @@ function ExportDialog(props: ExportDialogProps) {
       props.onSuccess(`${format === 'PROJECT' ? 'Project' : format} exported`)
     } catch (error) {
       console.error(error)
+      setExportError('Export failed. Check that the project fonts are available and try again.')
       setExporting(false)
     }
   }
@@ -3926,6 +4052,7 @@ function ExportDialog(props: ExportDialogProps) {
             <div><span>Output size</span><strong>{format === 'SVG' || format === 'PROJECT' ? 'Vector document' : `${outputWidth} × ${outputHeight} px`}</strong><small>Estimated {estimatedMb} MB</small></div>
           </div>
         </div>
+        {exportError && <p className="export-error" role="alert">{exportError}</p>}
         <div className="dialog-footer"><button className="button secondary" onClick={props.onClose}>Cancel</button><button className="button primary export-confirm" disabled={exporting} onClick={runExport}>{exporting ? <span className="spinner" /> : <Download size={17} />}{exporting ? 'Preparing…' : 'Export'}</button></div>
       </section>
     </div>
@@ -3961,6 +4088,8 @@ async function exportDesign(options: ExportOptions) {
   }
   const embeddedLayers = await embedImages(options.layers)
   const includeBackground = options.format !== 'PNG' || !options.transparent
+  await ensureLayerFonts(embeddedLayers)
+  await document.fonts.ready
   const svg = buildSvg(embeddedLayers, options.documentMeta, includeBackground)
   if (options.format === 'SVG') {
     downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `${safeName}.svg`)
@@ -4004,6 +4133,7 @@ async function sampleArtboardColor(layers: DesignLayer[], meta: DesignDocument, 
     if (layer.type !== 'image' || !layer.src || layer.src.startsWith('data:')) return layer
     return { ...layer, src: await imageToDataUrl(layer.src) }
   }))
+  await ensureLayerFonts(embedded)
   await document.fonts.ready
   const svg = buildSvg(embedded, meta, true)
   const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
@@ -4047,8 +4177,21 @@ function escapeXml(value: string) {
   return value.replace(/[<>&'"]/g, (char) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[char] || char))
 }
 
+function embeddedFontCss(layers: DesignLayer[]) {
+  const seen = new Set<string>()
+  return layers.flatMap((layer) => {
+    if (!layer.fontFamily || !/^PocketboardFont-[a-f0-9]{32}$/.test(layer.fontFamily) || !layer.fontAssets?.length || seen.has(layer.fontFamily)) return []
+    seen.add(layer.fontFamily)
+    return layer.fontAssets.flatMap((asset) => {
+      if (!/^data:[^,;]*;base64,[a-zA-Z0-9+/=]+$/.test(asset.data)) return []
+      const range = asset.unicodeRange && /^[Uu+0-9a-fA-F?,\s-]+$/.test(asset.unicodeRange) ? `unicode-range:${asset.unicodeRange};` : ''
+      return [`@font-face{font-family:'${layer.fontFamily}';src:url('${asset.data}');font-style:normal;font-weight:400;${range}}`]
+    })
+  }).join('')
+}
+
 function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground: boolean) {
-  const defs = layers.map((layer) => {
+  const defs = `<style>${embeddedFontCss(layers)}</style>` + layers.map((layer) => {
     let definition = ''
     layer.maskSelections?.forEach((selection, index) => {
       const id = `${layer.id}-${index}`

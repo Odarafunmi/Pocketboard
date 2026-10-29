@@ -1,4 +1,4 @@
-const CACHE = 'pocketboard-v18'
+const CACHE = 'pocketboard-v20'
 const CORE = ['/', '/manifest.webmanifest', '/favicon.svg', '/editorial-chair.jpg']
 
 self.addEventListener('install', (event) => {
@@ -15,7 +15,7 @@ self.addEventListener('activate', (event) => {
 })
 
 self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return
+  if (event.request.method !== 'GET' || new URL(event.request.url).origin !== self.location.origin) return
   // Always prefer the latest app shell when online so installed clients receive
   // new interaction fixes; retain the cached shell for offline use.
   if (event.request.mode === 'navigate') {

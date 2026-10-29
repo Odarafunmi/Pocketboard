@@ -4753,3 +4753,24 @@ button:disabled {
 .selection-tool-controls input { width: 56px; }
 .selection-tool-controls .button { min-height: 36px; white-space: nowrap; }
 @media (max-width: 1023px) { .selection-tool-controls { bottom: 78px; width: calc(100% - 24px); } }
+
+.font-picker, .font-manager { min-width: 0; }
+.font-field, .font-search, .font-online-search label { display: grid; gap: 6px; }
+.font-field select, .font-search input, .font-online-search input { width: 100%; min-width: 0; min-height: 40px; padding: 8px; color: var(--text-primary); background: var(--surface-input); border: 1px solid var(--border-strong); border-radius: 8px; }
+.font-manager { margin: 10px 0; }
+.font-manager summary { cursor: pointer; color: var(--accent); min-height: 36px; display: flex; align-items: center; }
+.font-manager p, .font-manager small { color: var(--text-secondary); line-height: 1.45; }
+.font-manager p { margin: 0 0 8px; }
+.font-manager > * + * { margin-top: 8px; }
+.font-manager > small { display: block; }
+.font-results { max-height: 180px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.font-results > button, .font-results > div { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 8px; color: var(--text-primary); background: var(--surface); border: 0; border-bottom: 1px solid var(--border); }
+.font-results > div > span { display: grid; gap: 3px; min-width: 0; overflow-wrap: anywhere; }
+.font-results > div > button { color: var(--accent); background: none; border: 0; min-height: 36px; }
+.font-results a { color: var(--accent); }
+.font-online-search { display: flex; gap: 8px; align-items: end; }
+.font-online-search label { flex: 1; min-width: 0; }
+.case-controls { display: flex; gap: 8px; margin: 8px 0; }
+.case-controls .button { flex: 1; min-width: 0; padding-inline: 6px; }
+.export-error { margin: 0 16px 8px; color: var(--danger); }
+.font-picker > .font-search { margin-bottom: 8px; }

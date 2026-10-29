@@ -55,6 +55,9 @@ export interface LayerBlur { type: BlurType; amount: number; angle: number; curv
 
 export type MaskSelection = { mode: 'keep' | 'hide'; feather: number } & ({ kind: 'polygon'; points: Point[] } | { kind: 'wand'; image: string })
 
+export interface FontAsset { data: string; unicodeRange?: string }
+export interface StoredFont { id: string; label: string; assets: FontAsset[] }
+
 export interface DesignLayer {
   id: string
   name: string
@@ -85,6 +88,8 @@ export interface DesignLayer {
   textWrap?: boolean
   fontWeight?: number
   fontFamily?: string
+  fontLabel?: string
+  fontAssets?: FontAsset[]
   letterSpacing?: number
   lineHeight?: number
   textAlign?: 'left' | 'center' | 'right'
