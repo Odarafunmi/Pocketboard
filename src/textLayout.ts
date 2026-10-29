@@ -9,7 +9,7 @@ export function textLines(layer: DesignLayer): string[] {
   if (context === undefined) context = document.createElement('canvas').getContext('2d')
   const size = layer.fontSize || 32
   const width = Math.max(1, layer.width / (layer.textScaleX || 1))
-  if (context) context.font = `${layer.fontWeight || 400} ${size}px "${(layer.fontFamily || 'Inter').replace(/["\\]/g, '')}"`
+  if (context) context.font = `${layer.fontStyle === 'italic' ? 'italic' : 'normal'} ${layer.fontWeight || 400} ${size}px "${(layer.fontFamily || 'Inter').replace(/["\\]/g, '')}"`
   const measure = (value: string) => (context?.measureText(value).width ?? value.length * size * .6) + Math.max(0, [...value].length - 1) * (layer.letterSpacing || 0)
   const result: string[] = []
   for (const paragraph of (layer.text || '').split('\n')) {

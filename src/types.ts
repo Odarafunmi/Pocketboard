@@ -71,10 +71,11 @@ export interface DesignLayer {
   visible: boolean
   locked: boolean
   fill: string
-  fillType?: 'solid' | 'linear' | 'radial'
+  fillType?: 'none' | 'solid' | 'linear' | 'radial'
   gradient?: GradientFill
   stroke: string
   strokeWidth: number
+  strokeEnabled?: boolean
   radius?: number
   sides?: number
   shapeKind?: ShapeKind
@@ -87,6 +88,8 @@ export interface DesignLayer {
   textScaleX?: number
   textWrap?: boolean
   fontWeight?: number
+  fontStyle?: 'normal' | 'italic'
+  underline?: boolean
   fontFamily?: string
   fontLabel?: string
   fontAssets?: FontAsset[]
