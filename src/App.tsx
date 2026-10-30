@@ -601,6 +601,14 @@ function App() {
     setSelectedId(primary)
   }
 
+  const beginLayerMultiSelection = (id: string) => {
+    finishTextEditing()
+    if (!multiSelectMode) selectObject(id)
+    else if (!selectedIds.includes(id)) toggleMultiSelection(id)
+    setActiveTool('select')
+    setMultiSelectMode(true)
+  }
+
   const updateSelection = useCallback((patch: Partial<DesignLayer>) => {
     if (!selectedId) return
     const current = layersRef.current
@@ -645,6 +653,7 @@ function App() {
     if (!target || target.type !== 'image') { setActiveTool('object-select'); setMobileSheet(null); showToast('Select an image, then choose a selection tool.'); return }
     if (target.locked) { showToast('Unlock the image before masking.'); return }
     finishTextEditing()
+    setMultiSelectMode(false)
     setActiveTool(tool)
     setMobileSheet(null)
   }
@@ -669,6 +678,7 @@ function App() {
       return
     }
     finishTextEditing()
+    setMultiSelectMode(false)
     setSelectedId(target.id)
     if (!target.maskCreated && !target.maskStrokes?.length && !target.maskSelections?.length) updateLayer(target.id, { maskCreated: true })
     setMaskBrushMode('hide')
@@ -1091,8 +1101,9 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
-  const showQuickStyle = isCompact && !multiSelectMode && activeTool !== 'pen' && activeTool !== 'brush' && activeTool !== 'paint-brush' && selected && selected.id === quickStyleId && !selected.locked
+  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
   const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
+  const showSelectionOptions = isCompact && !multiSelectMode && (activeTool === 'polygon-mask' || activeTool === 'wand-mask')
   const showMultiOptions = isCompact && multiSelectMode
   const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
@@ -1104,15 +1115,15 @@ function App() {
       setActiveTool('object-select')
     } else if (action === 'polygon-mask' || action === 'wand-mask') activateSelection(action)
     else if (action === 'mask-brush') activateMaskBrush()
-    else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null) }
+    else if (action === 'paint-brush') { finishTextEditing(); setMultiSelectMode(false); setActiveTool('paint-brush'); setMobileSheet(null) }
     else if (action === 'shapes') setMobileSheet('shapes')
     else if (action === 'text') { if (!selected?.isEmpty) setSelectedId(null); setActiveTool('text') }
     else if (action === 'image') imageInputRef.current?.click()
     else if (action === 'extract-palette') { setMobileSheet('properties'); void extractSelectedPalette() }
     else if (action === 'layers') setMobileSheet('layers')
     else if (action === 'more') setMobileSheet('more')
-    else if ((action === 'properties' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) { setMobileSheet(null); setQuickStyleId((id) => action === 'properties' && id === selected.id ? null : selected.id) }
-    else if (action === 'fill' || action === 'align' || action === 'arrange') setMobileSheet('properties')
+    else if ((action === 'properties' || action === 'fill' || action === 'shape-mask' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) { setMobileSheet(null); if (activeTool === 'polygon-mask' || activeTool === 'wand-mask') setActiveTool('select'); setQuickStyleId((id) => action === 'properties' && id === selected.id && activeTool !== 'polygon-mask' && activeTool !== 'wand-mask' ? null : selected.id) }
+    else if (action === 'properties' || action === 'fill' || action === 'align' || action === 'arrange') setMobileSheet('properties')
     else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
     else if (action === 'finish-text') finishTextEditing()
     else if (action === 'corners') setActiveTool('corner')
@@ -1122,8 +1133,7 @@ function App() {
     else if (action === 'crop' && selected?.type === 'image') {
       if ((selected.imageScale || 1) <= 1) updateLayer(selected.id, { imageScale: 1.15 })
       setActiveTool('crop')
-    } else if (action === 'shape-mask' && selected?.type === 'image') setMobileSheet('mask')
-    else if (action === 'mask-hide') setMaskBrushMode('hide')
+    } else if (action === 'mask-hide') setMaskBrushMode('hide')
     else if (action === 'mask-restore') setMaskBrushMode('restore')
     else if (action === 'mask-smaller') setMaskBrushSize((size) => clamp(round(size * .75), 8, 320))
     else if (action === 'mask-larger') setMaskBrushSize((size) => clamp(round(size * 1.3), 8, 320))
@@ -1209,10 +1219,11 @@ function App() {
             multiSelectMode={multiSelectMode}
             onMultiSelectMode={(enabled) => { setMultiSelectMode(enabled); if (enabled) setActiveTool('select') }}
             onToggleMulti={toggleMultiSelection}
+            onStartMulti={beginLayerMultiSelection}
             onClearSelection={() => selectObject(null)}
             onModifyLayer={(id) => { setMultiSelectMode(false); selectObject(id, selectedIds.length > 1 && selectedIds.includes(id)) }}
             maskEditingId={activeTool === 'brush' ? selectedId : null}
-            onSelect={toggleMultiSelection}
+            onSelect={(id) => { finishTextEditing(); setActiveTool('select'); selectObject(id) }}
             onEditMask={(id) => activateMaskBrush(id)}
             onToggleClip={(layer) => { if (!layer.locked) updateLayer(layer.id, { clipToBelow: !layer.clipToBelow }) }}
             onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
@@ -1229,7 +1240,7 @@ function App() {
           />
         </aside>
 
-        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''} ${showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions ? 'has-quick-style' : ''}`} aria-label="Design canvas"
+        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''} ${showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions ? 'has-quick-style' : ''}`} aria-label="Design canvas"
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingFiles(true) } }}
           onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false) }}
           onDrop={(event) => {
@@ -1261,15 +1272,20 @@ function App() {
             onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
             onClose={() => setQuickStyleId(null)}
             onMore={() => { finishTextEditing(); setMobileSheet('properties') }}
+            onMaskMore={() => setMobileSheet('mask')}
+            onAction={handleMobileToolAction}
           />}
           {showBrushOptions && <div className="quick-style-wrap"><div className="quick-style brush-quick-settings" role="group" aria-label={activeTool === 'paint-brush' ? 'Brush settings' : 'Mask brush settings'}>
+            {activeTool === 'brush' && <><button className="quick-style-text" aria-pressed={maskBrushMode === 'hide'} onClick={() => setMaskBrushMode('hide')}>Hide</button><button className="quick-style-text" aria-pressed={maskBrushMode === 'restore'} onClick={() => setMaskBrushMode('restore')}>Restore</button></>}
             {activeTool === 'paint-brush' && <PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} />}
+            <label className="mask-strength-control"><span>Size</span><input type="range" aria-label={activeTool === 'paint-brush' ? 'Brush size' : 'Mask brush size'} min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}px</output></label>
             <MaskBrushSettings prefix={activeTool === 'paint-brush' ? 'Brush' : 'Mask brush'} opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} />
           </div></div>}
           {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
           <Canvas
             artboardRef={artboardRef}
-            quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions)}
+            quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions)}
+            compactSelectionControls={showSelectionOptions}
             documentMeta={documentMeta}
             layers={layers}
             selected={selected}
@@ -1412,10 +1428,11 @@ function App() {
               multiSelectMode={multiSelectMode}
               onMultiSelectMode={(enabled) => { setMultiSelectMode(enabled); if (enabled) setActiveTool('select') }}
               onToggleMulti={toggleMultiSelection}
+              onStartMulti={beginLayerMultiSelection}
               onClearSelection={() => selectObject(null)}
               onModifyLayer={(id) => { setMultiSelectMode(false); selectObject(id, selectedIds.length > 1 && selectedIds.includes(id)); setMobileSheet('properties') }}
               maskEditingId={activeTool === 'brush' ? selectedId : null}
-              onSelect={toggleMultiSelection}
+              onSelect={(id) => { finishTextEditing(); setActiveTool('select'); selectObject(id); setMobileSheet(null) }}
               onEditMask={(id) => activateMaskBrush(id)}
               onToggleClip={(layer) => { if (!layer.locked) updateLayer(layer.id, { clipToBelow: !layer.clipToBelow }) }}
               onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
@@ -1745,6 +1762,7 @@ interface LayersPanelProps {
   multiSelectMode: boolean
   onMultiSelectMode: (enabled: boolean) => void
   onToggleMulti: (id: string) => void
+  onStartMulti: (id: string) => void
   onClearSelection: () => void
   onModifyLayer: (id: string) => void
   maskEditingId: string | null
@@ -1775,7 +1793,10 @@ function LayersPanel(props: LayersPanelProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const dragOrderRef = useRef<string[] | null>(null)
   const dragCleanupRef = useRef<(() => void) | null>(null)
-  useEffect(() => () => dragCleanupRef.current?.(), [])
+  const longPressCleanupRef = useRef<(() => void) | null>(null)
+  const suppressClickRef = useRef(false)
+  const lastTouchRef = useRef(0)
+  useEffect(() => () => { dragCleanupRef.current?.(); longPressCleanupRef.current?.() }, [])
 
   const panelOrder = dragOrder || [...props.layers].reverse().map((layer) => layer.id)
   const byId = new Map(props.layers.map((layer) => [layer.id, layer]))
@@ -1855,6 +1876,42 @@ function LayersPanel(props: LayersPanelProps) {
     window.addEventListener('pointercancel', onCancel)
   }
 
+  const startLayerLongPress = (event: ReactPointerEvent<HTMLDivElement>, layer: DesignLayer) => {
+    if (event.pointerType !== 'touch' || closestEventElement(event.target, 'button')) return
+    lastTouchRef.current = Date.now()
+    longPressCleanupRef.current?.()
+    const pointerId = event.pointerId, startX = event.clientX, startY = event.clientY
+    let triggered = false
+    const timer = window.setTimeout(() => {
+      triggered = true
+      suppressClickRef.current = true
+      lastTouchRef.current = Date.now()
+      setRowMenu(null)
+      props.onStartMulti(layer.id)
+    }, 500)
+    const cleanup = () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', cancel)
+      longPressCleanupRef.current = null
+    }
+    const move = (next: PointerEvent) => {
+      if (next.pointerId === pointerId && !triggered && Math.hypot(next.clientX - startX, next.clientY - startY) > 10) cleanup()
+    }
+    const finish = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId) return
+      if (triggered) { lastTouchRef.current = Date.now(); window.setTimeout(() => { suppressClickRef.current = false }, 400) }
+      cleanup()
+    }
+    const up = (next: PointerEvent) => finish(next)
+    const cancel = (next: PointerEvent) => finish(next)
+    longPressCleanupRef.current = cleanup
+    window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+  }
+
   const reorderWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, layer: DesignLayer) => {
     if (query || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
     event.preventDefault()
@@ -1887,21 +1944,45 @@ function LayersPanel(props: LayersPanelProps) {
         {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
       </label>
       <div className="layer-selection-controls">
-        <span>{props.selectedIds.length ? `${props.selectedIds.length} selected` : 'Tap layers to select'}</span>
+        <span>{props.multiSelectMode ? `${props.selectedIds.length} selected · Select layers` : 'Hold or right-click for multiple'}</span>
         <button disabled={!props.selectedIds.length} onClick={props.onClearSelection}>Clear</button>
-        <button aria-pressed={props.multiSelectMode} onClick={() => props.onMultiSelectMode(!props.multiSelectMode)}>{props.multiSelectMode ? 'Done selecting on canvas' : 'Select on canvas'}</button>
+        {props.multiSelectMode && <button onClick={() => props.onMultiSelectMode(false)}>Done selecting</button>}
       </div>
       <div className="layer-order-hint"><GripVertical size={12} /><span>{query ? 'Clear search to reorder' : 'Drag layers to reorder'}</span></div>
-      <div ref={listRef} className={`layer-list ${draggingId ? 'is-reordering' : ''}`} role="listbox" aria-label="Canvas layers">
+      <div ref={listRef} className={`layer-list ${draggingId ? 'is-reordering' : ''}`} role="listbox" aria-label="Canvas layers" aria-multiselectable={props.multiSelectMode}>
         {visibleLayers.length ? visibleLayers.map((layer) => (
           <div
             key={layer.id}
             role="option"
+            tabIndex={0}
             aria-selected={props.selectedIds.includes(layer.id)}
             data-layer-id={layer.id}
             className={`layer-row ${props.selectedIds.includes(layer.id) ? 'selected' : ''} ${!layer.visible ? 'muted' : ''} ${draggingId === layer.id ? 'dragging' : ''}`}
-            onClick={(event) => { if (event.shiftKey || event.ctrlKey || event.metaKey) props.onToggleMulti(layer.id); else props.onSelect(layer.id) }}
-            onContextMenu={(event) => { event.preventDefault(); setRowMenu({ id: layer.id, x: Math.min(event.clientX, window.innerWidth - 170), y: Math.min(event.clientY, window.innerHeight - 150) }) }}
+            onPointerDown={(event) => startLayerLongPress(event, layer)}
+            onClick={() => {
+              if (suppressClickRef.current) { suppressClickRef.current = false; return }
+              setRowMenu(null)
+              if (props.multiSelectMode) props.onToggleMulti(layer.id)
+              else props.onSelect(layer.id)
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              if (Date.now() - lastTouchRef.current < 1200) return
+              props.onStartMulti(layer.id)
+              const panelRight = event.currentTarget.closest('.layers-inner')?.getBoundingClientRect().right ?? event.clientX
+              setRowMenu({ id: layer.id, x: Math.min(panelRight + 8, window.innerWidth - 170), y: Math.min(event.clientY, window.innerHeight - 150) })
+            }}
+            onKeyDown={(event) => {
+              if (event.target !== event.currentTarget) return
+              if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                event.preventDefault(); props.onStartMulti(layer.id)
+                const rect = event.currentTarget.getBoundingClientRect()
+                setRowMenu({ id: layer.id, x: Math.min((event.currentTarget.closest('.layers-inner')?.getBoundingClientRect().right ?? rect.right) + 8, window.innerWidth - 170), y: Math.min(rect.bottom, window.innerHeight - 150) })
+              } else if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault(); setRowMenu(null)
+                if (props.multiSelectMode) props.onToggleMulti(layer.id); else props.onSelect(layer.id)
+              }
+            }}
           >
             <button
               className="row-grip"
@@ -1928,7 +2009,7 @@ function LayersPanel(props: LayersPanelProps) {
         )}
       </div>
       {rowMenu && <div className="layer-row-menu" role="menu" style={{ left: rowMenu.x, top: rowMenu.y }}>
-        <button role="menuitem" onClick={() => { if (!props.selectedIds.includes(rowMenu.id)) props.onToggleMulti(rowMenu.id); props.onMultiSelectMode(true); setRowMenu(null) }}>Select</button>
+        <button role="menuitem" onClick={() => { setRowMenu(null) }}>Select</button>
         <button role="menuitem" onClick={() => { props.onModifyLayer(rowMenu.id); setRowMenu(null) }}>Modify</button>
         <button role="menuitem" onClick={() => { if (props.selectedIds.includes(rowMenu.id)) props.onDelete(); else { const target = props.layers.find((layer) => layer.id === rowMenu.id); if (target && !target.locked) props.onDeleteLayer(rowMenu.id) } setRowMenu(null) }}>Delete</button>
         <button role="menuitem" onClick={() => setRowMenu(null)}>Close</button>
@@ -1989,6 +2070,7 @@ interface CanvasProps {
   multiSelectMode: boolean
   onToggleMulti: (id: string) => void
   compactPenControls: boolean
+  compactSelectionControls: boolean
   onMoveSelectionLive: (snapshot: DesignLayer[], ids: string[], dx: number, dy: number) => void
   onRestoreSelection: (snapshot: DesignLayer[]) => void
   activeTool: Tool
@@ -2943,12 +3025,14 @@ function Canvas(props: CanvasProps) {
           </g>}
           {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <g className="mask-brush-preview" pointerEvents="none"><MaskStrokeElement layer={{ id: 'preview', name: '', type: 'path', x: 0, y: 0, width: props.documentMeta.width, height: props.documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'none', stroke: 'none', strokeWidth: 0 }} stroke={{ points: draftPoints.map((point) => ({ x: point.x / props.documentMeta.width, y: point.y / props.documentMeta.height })), size: props.maskBrushSize / Math.max(1, props.documentMeta.width, props.documentMeta.height), mode: props.maskBrushMode, opacity: props.maskBrushOpacity / 100, flow: props.maskBrushFlow / 100, hardness: props.brushHardness / 100 }} paintColor={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} /></g>}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><path d={bezierPath(draftPoints, draftHandles, false)} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => { const handle = draftHandles[index]; return handle && (handle.x || handle.y) ? <line key={`handle-${index}`} x1={point.x - handle.x} y1={point.y - handle.y} x2={point.x + handle.x} y2={point.y + handle.y} stroke={ACCENT} vectorEffect="non-scaling-stroke" /> : null })}{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
-          {props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+          {props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth={1 / zoomRatio} strokeDasharray={`${5 / zoomRatio} ${4 / zoomRatio}`} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
           {props.selectedIds.length === 1 && props.selected?.visible && !props.selected.isEmpty && props.editingTextId !== props.selected.id && (
             <SelectionOverlay
               layer={props.selected}
               mode={props.activeTool}
               handleScale={props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)}
+              // SVG's non-scaling stroke does not cancel the outer CSS zoom.
+              strokeScale={1 / zoomRatio}
               onResize={(event, handle) => startTransform(event, props.selected!, 'resize', handle)}
               onRotate={(event) => startTransform(event, props.selected!, 'rotate')}
               onCorner={(event) => startTransform(event, props.selected!, 'corner')}
@@ -2972,7 +3056,7 @@ function Canvas(props: CanvasProps) {
       </div>
     </div>
     {props.activeTool === 'pen' && !props.multiSelectMode && <div className={props.compactPenControls ? 'quick-style-wrap pen-actions compact' : 'pen-actions'} role="group" aria-label="Pen controls"><button aria-label="Straight pen" aria-pressed={penMode === 'straight'} onClick={() => setPenMode('straight')}>Straight</button><button aria-label="Curve pen" aria-pressed={penMode === 'curve'} onClick={() => setPenMode('curve')}>Curve</button><button disabled={draftPoints.length < 2} onClick={() => finishPenPath(false)}>Finish path</button><button disabled={!draftPoints.length} onClick={() => setPenDraft([], [])}>Cancel path</button></div>}
-    {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className="selection-tool-controls" aria-label="Mask selection controls">
+    {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className={`selection-tool-controls ${props.compactSelectionControls ? 'compact-selection-controls' : ''}`} role="toolbar" aria-label="Mask selection controls">
       <span>{props.activeTool === 'polygon-mask' ? 'Tap points around the object' : 'Tap a colour in the image'}</span>
       <label>Action <select aria-label="Selection mask action" value={props.selectionMode} onChange={(event) => props.onSelectionMode(event.target.value as 'keep' | 'hide')}><option value="keep">Keep selection</option><option value="hide">Mask selection out</option></select></label>
       {props.activeTool === 'wand-mask' && <label>Tolerance <input aria-label="Magic wand tolerance" type="number" min="0" max="255" value={props.selectionTolerance} onChange={(event) => props.onSelectionTolerance(clamp(Number(event.target.value), 0, 255))} /></label>}
@@ -3396,10 +3480,11 @@ function starPoints(cx: number, cy: number, outer: number, inner: number) {
   }).join(' ')
 }
 
-function SelectionOverlay({ layer, mode, handleScale, onResize, onRotate, onCorner, onCrop }: {
+function SelectionOverlay({ layer, mode, handleScale, strokeScale, onResize, onRotate, onCorner, onCrop }: {
   layer: DesignLayer
   mode: Tool
   handleScale: number
+  strokeScale: number
   onResize: (event: ReactPointerEvent, handle: ResizeHandle) => void
   onRotate: (event: ReactPointerEvent) => void
   onCorner: (event: ReactPointerEvent) => void
@@ -3419,40 +3504,46 @@ function SelectionOverlay({ layer, mode, handleScale, onResize, onRotate, onCorn
     { id: 'se', x: layer.x + layer.width, y: layer.y + height, cursor: 'nwse-resize' },
     { id: 'sw', x: layer.x, y: layer.y + height, cursor: 'nesw-resize' },
   ]
+  // Keep visible handles compact on small on-screen objects without shrinking their touch targets.
+  const visualSpan = layer.height < 2 ? layer.width : Math.min(layer.width, height)
+  const handleVisualScale = clamp(visualSpan / handleScale / 64, .25, 1)
   const standard = mode === 'select'
   const cornerMode = mode === 'corner' && (layer.type === 'rectangle' || (layer.type === 'polygon' && ((layer.shapeKind || 'regular') === 'regular' || layer.shapeKind === 'diamond' || layer.shapeKind === 'starburst')))
   const cropMode = mode === 'crop' && layer.type === 'image'
   return (
     <g transform={transform} className={`selection-overlay ${cropMode ? 'crop-selection' : ''}`} aria-hidden="true">
-      <rect x={layer.x} y={layer.y} width={layer.width} height={height} fill={cropMode ? 'rgba(91,75,240,.04)' : 'none'} stroke={ACCENT} strokeWidth={cropMode ? '3' : '2'} strokeDasharray={cropMode ? '8 5' : undefined} vectorEffect="non-scaling-stroke" pointerEvents={cropMode ? 'all' : 'none'} onPointerDown={cropMode ? onCrop : undefined} />
+      <rect x={layer.x} y={layer.y} width={layer.width} height={height} fill={cropMode ? 'rgba(91,75,240,.04)' : 'none'} stroke={ACCENT} strokeWidth={strokeScale} strokeDasharray={cropMode ? `${8 * strokeScale} ${5 * strokeScale}` : undefined} vectorEffect="non-scaling-stroke" pointerEvents={cropMode ? 'all' : 'none'} onPointerDown={cropMode ? onCrop : undefined} />
       {standard && <>
-        <line x1={cx} y1={layer.y} x2={cx} y2={layer.y - 34} stroke={ACCENT} strokeWidth="1.5" vectorEffect="non-scaling-stroke" pointerEvents="none" />
-        <circle cx={cx} cy={layer.y - 42} r="9" fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" onPointerDown={onRotate} style={{ cursor: 'grab', pointerEvents: 'all' }} />
+        <line x1={cx} y1={layer.y} x2={cx} y2={layer.y - 30 * handleScale} stroke={ACCENT} strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" pointerEvents="none" />
+        <g onPointerDown={onRotate} style={{ cursor: 'grab', pointerEvents: 'all' }}>
+          <circle cx={cx} cy={layer.y - 36 * handleScale} r={22 * handleScale} fill="transparent" />
+          <circle cx={cx} cy={layer.y - 36 * handleScale} r={5 * handleScale} fill="white" stroke={ACCENT} strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" />
+        </g>
         {handles.map((handle) => {
-          const width = (handle.side === 'vertical' ? 8 : handle.side === 'horizontal' ? 20 : 10) * handleScale
-          const handleHeight = (handle.side === 'vertical' ? 20 : handle.side === 'horizontal' ? 8 : 10) * handleScale
+          const width = (handle.side === 'vertical' ? 6 : handle.side === 'horizontal' ? 14 : 8) * handleScale * handleVisualScale
+          const handleHeight = (handle.side === 'vertical' ? 14 : handle.side === 'horizontal' ? 6 : 8) * handleScale * handleVisualScale
           const hitSize = 44 * handleScale
           return (
             <g key={handle.id} data-resize-handle={handle.id} data-resize-mode={handle.side ? 'side' : 'proportional'} onPointerDown={(event) => onResize(event, handle.id)} style={{ cursor: handle.cursor, pointerEvents: 'all' }}>
               <rect x={handle.x - hitSize / 2} y={handle.y - hitSize / 2} width={hitSize} height={hitSize} fill="transparent" />
-              <rect x={handle.x - width / 2} y={handle.y - handleHeight / 2} width={width} height={handleHeight} rx={2.5 * handleScale} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+              <rect x={handle.x - width / 2} y={handle.y - handleHeight / 2} width={width} height={handleHeight} rx={2 * handleScale * handleVisualScale} fill="white" stroke={ACCENT} strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" />
             </g>
           )
         })}
       </>}
       {cornerMode && <g onPointerDown={onCorner} style={{ cursor: 'ew-resize', pointerEvents: 'all' }}>
-        <circle cx={layer.x + clamp(layer.radius || 18, 14, layer.width / 2)} cy={layer.y + clamp(layer.radius || 18, 14, height / 2)} r="22" fill="transparent" />
-        <circle cx={layer.x + clamp(layer.radius || 18, 14, layer.width / 2)} cy={layer.y + clamp(layer.radius || 18, 14, height / 2)} r="8" fill="#FFB800" stroke="white" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+        <circle cx={layer.x + clamp(layer.radius || 18, 14, layer.width / 2)} cy={layer.y + clamp(layer.radius || 18, 14, height / 2)} r={22 * handleScale} fill="transparent" />
+        <circle cx={layer.x + clamp(layer.radius || 18, 14, layer.width / 2)} cy={layer.y + clamp(layer.radius || 18, 14, height / 2)} r={5 * handleScale} fill="#FFB800" stroke="white" strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" />
       </g>}
-      {!layer.locked && <SizePill x={cx} y={layer.y + height + 28} text={cropMode ? 'Drag to move image' : cornerMode ? `Corner ${round(layer.radius || 0)} px` : `${round(layer.width)} × ${round(layer.height)}`} />}
+      {!layer.locked && <SizePill x={cx} y={layer.y + height + 12 * handleScale} scale={handleScale} text={cropMode ? 'Drag to move image' : cornerMode ? `Corner ${round(layer.radius || 0)} px` : `${round(layer.width)} × ${round(layer.height)}`} />}
     </g>
   )
 }
 
-function SizePill({ x, y, text }: { x: number; y: number; text: string }) {
+function SizePill({ x, y, text, scale }: { x: number; y: number; text: string; scale: number }) {
   const width = Math.max(82, text.length * 8.5)
   return (
-    <g transform={`translate(${x - width / 2} ${y})`}>
+    <g transform={`translate(${x} ${y}) scale(${scale}) translate(${-width / 2} 0)`} pointerEvents="none">
       <rect width={width} height="28" rx="8" fill={ACCENT} />
       <text x={width / 2} y="19" textAnchor="middle" fontFamily="Inter" fontSize="14" fontWeight="600" fill="white">{text}</text>
     </g>
@@ -4137,11 +4228,19 @@ function QuickPositionInput({ axis, value, onChange }: { axis: 'x' | 'y'; value:
   return <label className="quick-style-position">{axis.toUpperCase()}<input aria-label={`${axis.toUpperCase()} position in pixels`} type="number" step="1" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { const next = Number(draft); if (draft.trim() && Number.isFinite(next)) onChange(next); else setDraft(formatted) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>px</span></label>
 }
 
-function QuickStyleToolbar({ layer, onUpdate, onClose, onMore }: {
+function QuickStyleNumber({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+  return <label className="quick-style-position">{label}<input aria-label={label} type="number" min={min} max={max} step="1" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { const next = Number(draft); if (draft.trim() && Number.isFinite(next)) onChange(clamp(next, min, max)); else setDraft(String(value)) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>px</span></label>
+}
+
+function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAction }: {
   layer: DesignLayer
   onUpdate: (patch: Partial<DesignLayer>) => void
   onClose: () => void
   onMore: () => void
+  onMaskMore: () => void
+  onAction: (action: MobileToolAction) => void
 }) {
   const changeText = (patch: Partial<DesignLayer>) => {
     const next = { ...layer, ...patch }
@@ -4165,6 +4264,25 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore }: {
         <button aria-label="Underline" aria-pressed={Boolean(layer.underline)} onPointerDown={keepFocus} onClick={() => changeText({ underline: !layer.underline })}><Underline /></button>
         <span className="quick-style-divider" />
       </>}
+      {layer.type !== 'text' && layer.type !== 'image' && !layer.isEmpty && <>
+        <label className="quick-style-colour">Fill <input type="color" aria-label="Shape fill colour" value={normalizeColor(layer.fill)} onChange={(event) => onUpdate({ fill: event.target.value, fillType: 'solid' })} /></label>
+        <button className="quick-style-text" aria-label="No fill" aria-pressed={layer.fillType === 'none'} onClick={() => onUpdate({ fillType: layer.fillType === 'none' ? 'solid' : 'none' })}>No fill</button>
+        <span className="quick-style-divider" />
+        <label className="quick-style-colour">Stroke <input type="color" aria-label="Shape stroke colour" value={normalizeColor(layer.stroke)} onChange={(event) => onUpdate({ stroke: event.target.value, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} /></label>
+        <button className="quick-style-text" aria-label="No stroke" aria-pressed={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none'} onClick={() => onUpdate(layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none' ? { strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 } : { strokeEnabled: false })}>No stroke</button>
+        <QuickStyleNumber label="Stroke width" value={layer.strokeWidth} min={0} max={1000} onChange={(strokeWidth) => onUpdate({ strokeWidth, strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke })} />
+        <span className="quick-style-divider" />
+      </>}
+      {layer.type === 'image' && <>
+        {([{ id: 'none', label: 'Rectangle', icon: <Square /> }, { id: 'rounded', label: 'Rounded', icon: <Spline /> }, { id: 'ellipse', label: 'Ellipse', icon: <Circle /> }, { id: 'star', label: 'Star', icon: <Star /> }] as const).map((item) => <button key={item.id} aria-label={`${item.label} image mask`} title={`${item.label} image mask`} aria-pressed={(layer.mask || 'none') === item.id} onClick={() => onUpdate({ mask: item.id })}>{item.icon}</button>)}
+        <button aria-label="Move image in mask" title="Move image in mask" onClick={() => onAction('crop')}><Crop /></button>
+        <button aria-label="Mask brush" title="Mask brush" onClick={() => onAction('mask-brush')}><Brush /></button>
+        <button aria-label="Polygonal selection" title="Polygonal selection" onClick={() => onAction('polygon-mask')}><LassoSelect /></button>
+        <button aria-label="Magic wand selection" title="Magic wand selection" onClick={() => onAction('wand-mask')}><WandSparkles /></button>
+        <button className="quick-style-text" onClick={onMaskMore}>Mask details</button>
+        <span className="quick-style-divider" />
+      </>}
+      {layer.type !== 'text' && !layer.isEmpty && <label className="mask-strength-control"><span>Opacity</span><input type="range" aria-label="Object opacity" min="0" max="100" value={Math.round(layer.opacity * 100)} onChange={(event) => onUpdate({ opacity: Number(event.target.value) / 100 })} /><output>{Math.round(layer.opacity * 100)}%</output></label>}
       {(['x', 'y'] as const).map((axis) => <QuickPositionInput key={axis} axis={axis} value={layer[axis]} onChange={(value) => onUpdate({ [axis]: value })} />)}
       <button className="quick-style-more" onPointerDown={keepFocus} onClick={onMore}>More</button>
       <button aria-label="Close quick style" onPointerDown={keepFocus} onClick={onClose}><X /></button>
