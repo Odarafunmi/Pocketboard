@@ -52,6 +52,8 @@ export interface MaskBrushStroke {
   /** Per-stroke opacity and per-dab flow, from 0 to 1. Missing values are 1 for older projects. */
   opacity?: number
   flow?: number
+  /** Opaque inner radius relative to the brush radius; omitted strokes stay hard. */
+  hardness?: number
 }
 
 export type BlurType = 'gaussian' | 'motion' | 'radial' | 'path'
