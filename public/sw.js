@@ -1,4 +1,4 @@
-const CACHE = 'pocketboard-v28'
+const CACHE = 'pocketboard-v30'
 const CORE = ['/', '/manifest.webmanifest', '/favicon.svg', '/editorial-chair.jpg']
 
 self.addEventListener('install', (event) => {

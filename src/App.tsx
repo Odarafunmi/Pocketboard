@@ -233,6 +233,7 @@ function App() {
   const [maskBrushSize, setMaskBrushSize] = useState(72)
   const [maskBrushOpacity, setMaskBrushOpacity] = useState(100)
   const [maskBrushFlow, setMaskBrushFlow] = useState(100)
+  const [brushHardness, setBrushHardness] = useState(100)
   const [paintColor, setPaintColor] = useState('#18181B')
   const [paintBackground, setPaintBackground] = useState('#FFFFFF')
   const [selectionMode, setSelectionMode] = useState<'keep' | 'hide'>('keep')
@@ -861,7 +862,7 @@ function App() {
     setSelectedId(layer.id)
   }, [commitLayers, selectedId])
 
-  const addPaintStroke = (points: Point[], size: number, opacity: number, flow: number, color: string) => {
+  const addPaintStroke = (points: Point[], size: number, opacity: number, flow: number, hardness: number, color: string) => {
     if (!points.length || opacity <= 0 || flow <= 0) return
     const current = layersRef.current
     const chosen = current.find((layer) => layer.id === selectedId)
@@ -874,7 +875,7 @@ function App() {
       const x = cx + dx * cos - dy * sin, y = cy + dx * sin + dy * cos
       return { x: ((target.flipX ? 2 * cx - x : x) - target.x) / Math.max(1, target.width), y: ((target.flipY ? 2 * cy - y : y) - target.y) / Math.max(1, target.height) }
     })
-    const stroke = { points: normalized, size: size / Math.max(1, target.width, target.height), mode: 'hide' as const, opacity: opacity / 100, flow: flow / 100, color }
+    const stroke = { points: normalized, size: size / Math.max(1, target.width, target.height), mode: 'hide' as const, opacity: opacity / 100, flow: flow / 100, hardness: hardness / 100, color }
     const updated = { ...target, isEmpty: false, name: target.isEmpty ? 'Paint layer' : target.name, paintStrokes: [...(target.paintStrokes || []), stroke] }
     commitLayers(current.some((layer) => layer.id === target.id) ? current.map((layer) => layer.id === target.id ? updated : layer) : [...current, updated])
     setSelectedId(target.id)
@@ -1261,11 +1262,11 @@ function App() {
             onClose={() => setQuickStyleId(null)}
             onMore={() => { finishTextEditing(); setMobileSheet('properties') }}
           />}
-          {showBrushOptions && <div className="quick-style-wrap"><div className="quick-style brush-quick-settings" role="group" aria-label="Mask brush settings">
+          {showBrushOptions && <div className="quick-style-wrap"><div className="quick-style brush-quick-settings" role="group" aria-label={activeTool === 'paint-brush' ? 'Brush settings' : 'Mask brush settings'}>
             {activeTool === 'paint-brush' && <PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} />}
-            <MaskBrushSettings prefix={activeTool === 'paint-brush' ? 'Brush' : 'Mask brush'} opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} />
+            <MaskBrushSettings prefix={activeTool === 'paint-brush' ? 'Brush' : 'Mask brush'} opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} />
           </div></div>}
-          {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
+          {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
           <Canvas
             artboardRef={artboardRef}
             quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions)}
@@ -1290,6 +1291,7 @@ function App() {
             maskBrushSize={maskBrushSize}
             maskBrushOpacity={maskBrushOpacity}
             maskBrushFlow={maskBrushFlow}
+            brushHardness={brushHardness}
             paintColor={paintColor}
             onAddPaintStroke={addPaintStroke}
             selectionMode={selectionMode} onSelectionMode={setSelectionMode}
@@ -1329,6 +1331,8 @@ function App() {
               maskBrushSize={maskBrushSize}
               maskBrushOpacity={maskBrushOpacity}
               maskBrushFlow={maskBrushFlow}
+              brushHardness={brushHardness}
+              onBrushHardness={setBrushHardness}
               onMaskOpacity={setMaskBrushOpacity}
               onMaskFlow={setMaskBrushFlow}
               onOpenProperties={() => setMobileSheet('properties')}
@@ -1999,8 +2003,9 @@ interface CanvasProps {
   maskBrushSize: number
   maskBrushOpacity: number
   maskBrushFlow: number
+  brushHardness: number
   paintColor: string
-  onAddPaintStroke: (points: Point[], size: number, opacity: number, flow: number, color: string) => void
+  onAddPaintStroke: (points: Point[], size: number, opacity: number, flow: number, hardness: number, color: string) => void
   selectionMode: 'keep' | 'hide'
   onSelectionMode: (mode: 'keep' | 'hide') => void
   selectionTolerance: number
@@ -2610,6 +2615,7 @@ function Canvas(props: CanvasProps) {
           mode: props.maskBrushMode,
           opacity: props.maskBrushOpacity / 100,
           flow: props.maskBrushFlow / 100,
+          hardness: props.brushHardness / 100,
         })
       }
       setDraftPoints([])
@@ -2648,7 +2654,7 @@ function Canvas(props: CanvasProps) {
     const finish = (commit: boolean) => {
       if (finished) return
       finished = true
-      if (commit) props.onAddPaintStroke(points, props.maskBrushSize, props.maskBrushOpacity, props.maskBrushFlow, props.paintColor)
+      if (commit) props.onAddPaintStroke(points, props.maskBrushSize, props.maskBrushOpacity, props.maskBrushFlow, props.brushHardness, props.paintColor)
       setDraftPoints([])
       window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel)
       maskStrokeCleanupRef.current = null
@@ -2935,7 +2941,7 @@ function Canvas(props: CanvasProps) {
             <polyline points={selectionPoints.map((point) => `${props.selected!.x + point.x * props.selected!.width},${props.selected!.y + point.y * props.selected!.height}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />
             {selectionPoints.map((point, index) => <circle key={index} cx={props.selected!.x + point.x * props.selected!.width} cy={props.selected!.y + point.y * props.selected!.height} r={5 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="white" stroke={ACCENT} vectorEffect="non-scaling-stroke" />)}
           </g>}
-          {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <path className="mask-brush-preview" d={smoothPath(draftPoints, .55)} fill="none" stroke={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} strokeWidth={props.maskBrushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".58" pointerEvents="none" />}
+          {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <g className="mask-brush-preview" pointerEvents="none"><MaskStrokeElement layer={{ id: 'preview', name: '', type: 'path', x: 0, y: 0, width: props.documentMeta.width, height: props.documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'none', stroke: 'none', strokeWidth: 0 }} stroke={{ points: draftPoints.map((point) => ({ x: point.x / props.documentMeta.width, y: point.y / props.documentMeta.height })), size: props.maskBrushSize / Math.max(1, props.documentMeta.width, props.documentMeta.height), mode: props.maskBrushMode, opacity: props.maskBrushOpacity / 100, flow: props.maskBrushFlow / 100, hardness: props.brushHardness / 100 }} paintColor={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} /></g>}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><path d={bezierPath(draftPoints, draftHandles, false)} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => { const handle = draftHandles[index]; return handle && (handle.x || handle.y) ? <line key={`handle-${index}`} x1={point.x - handle.x} y1={point.y - handle.y} x2={point.x + handle.x} y2={point.y + handle.y} stroke={ACCENT} vectorEffect="non-scaling-stroke" /> : null })}{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
           {props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
           {props.selectedIds.length === 1 && props.selected?.visible && !props.selected.isEmpty && props.editingTextId !== props.selected.id && (
@@ -3056,25 +3062,32 @@ function maskStrokeDabs(layer: DesignLayer, stroke: MaskBrushStroke) {
 }
 
 function MaskStrokeElement({ layer, stroke, paintColor }: { layer: DesignLayer; stroke: MaskBrushStroke; paintColor?: string }) {
+  const gradientId = `brush-gradient-${useId().replace(/:/g, '')}`
   const color = paintColor || (stroke.mode === 'hide' ? 'black' : 'white')
   const opacity = clamp(stroke.opacity ?? 1, 0, 1)
   const flow = clamp(stroke.flow ?? 1, 0, 1)
+  const hardness = clamp(stroke.hardness ?? 1, 0, 1)
   const points = maskStrokePoints(layer, stroke)
   const width = maskStrokeWidth(layer, stroke)
   if (!points.length) return null
-  if (flow >= 1 && points.length > 1) return <path d={smoothPath(points, .55)} fill="none" stroke={color} strokeWidth={width} strokeLinecap="round" strokeLinejoin="round" opacity={opacity} />
-  return <g opacity={opacity}>{maskStrokeDabs(layer, stroke).map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={width / 2} fill={color} fillOpacity={flow} />)}</g>
+  if (hardness >= 1 && flow >= 1 && points.length > 1) return <path d={smoothPath(points, .55)} fill="none" stroke={color} strokeWidth={width} strokeLinecap="round" strokeLinejoin="round" opacity={opacity} />
+  return <g opacity={opacity}>
+    {hardness < 1 && <defs><radialGradient id={gradientId}><stop offset={`${hardness * 100}%`} stopColor={color} /><stop offset="100%" stopColor={color} stopOpacity={0} /></radialGradient></defs>}
+    {maskStrokeDabs(layer, stroke).map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={width / 2} fill={hardness < 1 ? `url(#${gradientId})` : color} fillOpacity={flow} />)}
+  </g>
 }
 
-function maskStrokeSvg(layer: DesignLayer, stroke: MaskBrushStroke, paintColor?: string) {
+function maskStrokeSvg(layer: DesignLayer, stroke: MaskBrushStroke, gradientId: string, paintColor?: string) {
   const color = paintColor ? escapeXml(paintColor) : stroke.mode === 'hide' ? 'black' : 'white'
   const opacity = clamp(stroke.opacity ?? 1, 0, 1)
   const flow = clamp(stroke.flow ?? 1, 0, 1)
+  const hardness = clamp(stroke.hardness ?? 1, 0, 1)
   const points = maskStrokePoints(layer, stroke)
   const width = maskStrokeWidth(layer, stroke)
   if (!points.length) return ''
-  if (flow >= 1 && points.length > 1) return `<path d="${smoothPath(points, .55)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`
-  return `<g opacity="${opacity}">${maskStrokeDabs(layer, stroke).map((point) => `<circle cx="${point.x}" cy="${point.y}" r="${width / 2}" fill="${color}" fill-opacity="${flow}"/>`).join('')}</g>`
+  if (hardness >= 1 && flow >= 1 && points.length > 1) return `<path d="${smoothPath(points, .55)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`
+  const gradient = hardness < 1 ? `<defs><radialGradient id="${gradientId}"><stop offset="${hardness * 100}%" stop-color="${color}"/><stop offset="100%" stop-color="${color}" stop-opacity="0"/></radialGradient></defs>` : ''
+  return `<g opacity="${opacity}">${gradient}${maskStrokeDabs(layer, stroke).map((point) => `<circle cx="${point.x}" cy="${point.y}" r="${width / 2}" fill="${hardness < 1 ? `url(#${gradientId})` : color}" fill-opacity="${flow}"/>`).join('')}</g>`
 }
 
 function layerTransform(layer: DesignLayer) {
@@ -3545,20 +3558,24 @@ function PaintColors({ color, background, onColor, onBackground }: { color: stri
   return <div className="paint-colors"><label>Foreground <input type="color" aria-label="Brush foreground colour" value={color} onChange={(event) => onColor(event.target.value)} /></label><label>Background <input type="color" aria-label="Brush background colour" value={background} onChange={(event) => onBackground(event.target.value)} /></label><button aria-label="Swap brush colours" onClick={() => { onColor(background); onBackground(color) }}>Swap</button></div>
 }
 
-function MaskBrushSettings({ opacity, flow, onOpacity, onFlow, prefix = 'Mask brush' }: { opacity: number; flow: number; onOpacity: (value: number) => void; onFlow: (value: number) => void; prefix?: string }) {
+function MaskBrushSettings({ opacity, flow, hardness, onOpacity, onFlow, onHardness, prefix = 'Mask brush' }: { opacity: number; flow: number; hardness: number; onOpacity: (value: number) => void; onFlow: (value: number) => void; onHardness: (value: number) => void; prefix?: string }) {
   return <>
+    <div className="brush-hardness-presets" role="group" aria-label={`${prefix} edge`}><button type="button" aria-pressed={hardness === 0} onClick={() => onHardness(0)}>Soft</button><button type="button" aria-pressed={hardness === 100} onClick={() => onHardness(100)}>Hard</button></div>
+    <label className="mask-strength-control"><span>Hardness</span><input aria-label={`${prefix} hardness`} type="range" min="0" max="100" value={hardness} onChange={(event) => onHardness(Number(event.target.value))} /><output>{hardness}%</output></label>
     <label className="mask-strength-control"><span>Opacity</span><input aria-label={`${prefix} opacity`} type="range" min="0" max="100" value={opacity} onChange={(event) => onOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
     <label className="mask-strength-control"><span>Flow</span><input aria-label={`${prefix} flow`} type="range" min="0" max="100" value={flow} onChange={(event) => onFlow(Number(event.target.value))} /><output>{flow}%</output></label>
   </>
 }
 
-function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, maskBrushOpacity, maskBrushFlow, onMaskOpacity, onMaskFlow, onOpenProperties, onOpenMask, onPolygonMask, onWandMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
+function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, maskBrushOpacity, maskBrushFlow, brushHardness, onBrushHardness, onMaskOpacity, onMaskFlow, onOpenProperties, onOpenMask, onPolygonMask, onWandMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
   selected: DesignLayer
   activeTool: Tool
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
   maskBrushOpacity: number
   maskBrushFlow: number
+  brushHardness: number
+  onBrushHardness: (value: number) => void
   onMaskOpacity: (value: number) => void
   onMaskFlow: (value: number) => void
   onOpenProperties: () => void
@@ -3581,7 +3598,7 @@ function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, maskBr
         <button className={`context-item ${maskBrushMode === 'hide' ? 'active' : ''}`} onClick={() => onMaskMode('hide')}><Brush size={17} /><span>Hide</span></button>
         <button className={`context-item ${maskBrushMode === 'restore' ? 'active' : ''}`} onClick={() => onMaskMode('restore')}><Eraser size={17} /><span>Restore</span></button>
         <label className="mask-size-control"><span>Size</span><input type="range" min="8" max="320" value={maskBrushSize} onChange={(event) => onMaskSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label>
-        <MaskBrushSettings opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={onMaskOpacity} onFlow={onMaskFlow} />
+        <MaskBrushSettings opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={onMaskOpacity} onFlow={onMaskFlow} onHardness={onBrushHardness} />
         <button className="context-item danger" disabled={!selected.maskStrokes?.length} onClick={onClearMask}><Trash2 size={17} /><span>Clear</span></button>
       </div>
     )
@@ -4699,7 +4716,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     }
     if (layer.maskStrokes?.length || layer.maskSelections?.length) {
       const maskExtent = Math.max(layer.width, layer.height, 1)
-      const strokes = (layer.maskStrokes || []).map((stroke) => maskStrokeSvg(layer, stroke)).join('')
+      const strokes = (layer.maskStrokes || []).map((stroke, index) => maskStrokeSvg(layer, stroke, `soft-mask-${escapeXml(layer.id)}-${index}`)).join('')
       const base = (layer.maskSelections || []).reduce((node, _selection, index) => `<g mask="url(#selection-mask-${layer.id}-${index})">${node}</g>`, `<rect x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}" fill="white"/>`)
       definition += `<mask id="paint-mask-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}">${base}${strokes}</mask>`
     }
@@ -4724,7 +4741,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
       return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
     }
-    if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke) => maskStrokeSvg(layer, stroke, stroke.color)).join('')}</g>`)
+    if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke, index) => maskStrokeSvg(layer, stroke, `soft-paint-${escapeXml(layer.id)}-${index}`, stroke.color)).join('')}</g>`)
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
