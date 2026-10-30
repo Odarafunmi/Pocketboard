@@ -24,7 +24,10 @@ npm run preview
 - Shape and text tools: tap text to select and transform it, double-tap or double-click to edit its content, then use Done or tap outside to return to transform controls; drag side handles to wrap text or corner handles to scale it
 - File, Edit, Select, and View menus; import images and SVG elements from a device or drop them onto the canvas (SVGs are placed as images)
 - Layers, visibility, lock, drag or keyboard reordering, duplicate, and delete
-- Pen paths plus a non-destructive hide/restore mask brush with object selection, adjustable size, clearing, and undo
+- Straight and Bézier pen paths, colour painting layers, and non-destructive black/white layer masks with a selectable thumbnail, hide/restore brush, adjustable size, clearing, and undo
+- Multi-layer selection from the canvas and Layers, with group movement, deletion, and shared property changes
+- An offline shape asset library and empty layers that can become a shape, path, text, or paint layer
+- Clipping masks for any layer against the visible alpha of the layer directly below, including text and images
 - Selection-aware mobile actions for shape corners, fills, alignment, image crops, masks, text styling, duplication, and deletion
 - Linear and radial gradients, document swatches, blend modes, flipping, an artboard colour picker, and reusable colours extracted from a selected image
 - A grouped shape library with decorative, UI, infographic, geometric, stamp, and indicator presets, including round and rectangular stamps with a square option; editable polygons, starbursts, sunbursts, and corner controls
@@ -48,6 +51,18 @@ Imported images are stored in the browser and may be limited by device storage. 
 To sample a colour, use the picker beside a fill, gradient stop, stroke or background field, then tap the artboard. Press Escape or choose Cancel to exit. When focused, use arrow keys and Enter to sample with a keyboard. The picker samples the rendered artboard, not editor controls or the surrounding screen.
 
 Select an image and choose Extract palette from image (or Palette on mobile) to generate up to six colours from the original image. The palette stays on this device and is available in fill, gradient-stop, stroke, and background controls. Save writes the current design to this browser; export a project file for a portable backup.
+
+Use the pen toolbar to switch between Straight and Curve. In Straight mode, click or tap to place anchors; in Curve mode, drag an anchor to set mirrored Bézier handles. Finish with Enter or Finish path; click the first point to close. Handles are set during creation and cannot yet be edited after finishing the path.
+
+In Layers, Add layer creates an empty layer. Select it before adding a shape or text, drawing a pen path, or painting to use that layer. The Assets tab contains built-in shapes that work offline. The colour Brush paints on the selected paint or empty layer, or creates a paint layer when another kind of layer is selected. Use the foreground and background colour pickers and Swap, plus size, opacity, and flow controls. Select a mask thumbnail to switch the brush into masking mode; finish masking before returning to colour painting.
+
+Tap or click layer rows to add or remove them from the selection; use Clear to start again. On the canvas, use Shift or Ctrl/Command, or choose Select on canvas in Layers and tap layers. Turn canvas selection mode off before dragging the selection. Dragging a selected layer moves unlocked selected layers together; Delete removes the unlocked selection. Shared property controls apply common changes to the selection. Group resize and rotation handles are not yet available; individual layer handles are hidden while multiple layers are selected. Right-click a layer row for Select, Modify, and Delete.
+
+On mobile, select text and tap Style to open the horizontally scrollable toolbar above the canvas. Alignment, size, formatting and X/Y position are available there; More opens detailed properties. Other selected objects also have a compact positioning toolbar. Some advanced controls still use sheets.
+
+To paint a layer mask, select an unlocked layer and choose Mask brush. The Layers panel shows a black-and-white mask thumbnail; select it to return to the brush. Black hides and white restores. Brush opacity limits the strength of each stroke; flow controls how quickly overlapping dabs build up as you move the brush. Repeated strokes accumulate. On mobile, Layers is also available in the selected-object and brush toolbars. Brush strokes and selection masks are non-destructive and support undo.
+
+To create a clipping mask, select the upper layer in Layers and choose Create clipping mask, or use Clip in its mobile toolbar. Its visible pixels are restricted by the alpha of the layer immediately below; the lower layer remains visible. Choose Release clipping mask to remove it. Reordering changes which layer is directly below, and hiding that layer hides the clipped result. Clipping is preserved in project files and supported in local exports.
 
 For a selection mask, select an unlocked image. On a phone, choose Polygonal or Magic wand directly in the bottom image toolbar; on a tablet, use the contextual toolbar; on desktop, use the left tool strip or Selection masks in image properties. The tools are also listed under More on a phone. Choose whether to keep or hide the selected region and set feathering before applying it. The polygon tool places vertices with taps and uses Apply selection; the wand selects a contiguous region of similar colour using the chosen tolerance. The wand samples the displayed image crop, at up to 1024 pixels on its longest side; it is not an AI object detector. Selection masks remain editable through undo, clearing and the hide/restore mask brush. Large image masks can consume local storage.
 

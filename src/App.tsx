@@ -4,6 +4,7 @@ import {
   AlignHorizontalJustifyEnd,
   AlignHorizontalJustifyStart,
   AlignLeft,
+  AlignJustify,
   AlignRight,
   AlignVerticalJustifyCenter,
   AlignVerticalJustifyEnd,
@@ -80,7 +81,9 @@ import {
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -92,7 +95,7 @@ import {
 } from 'react'
 import { flushSync } from 'react-dom'
 import { emptyDocumentLayers, presets, sampleDocument, sampleLayers } from './data'
-import { textLines } from './textLayout'
+import { justifiedWords, textLineDetails, textLines } from './textLayout'
 import { extractImagePalette } from './imagePalette'
 import { magicWandMask } from './selectionMask'
 import { downloadOnlineFont, ensureFont, ensureLayerFonts, fontFromBlob, getLocalFonts, listSavedFonts, saveFont, searchOnlineFonts, type LocalFont, type OnlineFont } from './fonts'
@@ -141,6 +144,8 @@ const DEFAULT_GRADIENT: GradientFill = {
 const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
+  penHandles: layer.penHandles?.map((point) => ({ ...point })),
+  paintStrokes: layer.paintStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
   maskStrokes: layer.maskStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
   maskSelections: layer.maskSelections?.map((selection) => selection.kind === 'polygon' ? { ...selection, points: selection.points.map((point) => ({ ...point })) } : { ...selection }),
   gradient: layer.gradient ? { ...layer.gradient, stops: layer.gradient.stops.map((stop) => ({ ...stop })) } : undefined,
@@ -219,10 +224,17 @@ function App() {
     const stored = localStorage.getItem('pocketboard-layers')
     return stored ? null : 'objects-title'
   })
+  const [multiIds, setMultiIds] = useState<string[]>([])
+  const [multiSelectMode, setMultiSelectMode] = useState(false)
+  const selectedIds = useMemo(() => selectedId && multiIds.includes(selectedId) ? multiIds : selectedId ? [selectedId] : [], [selectedId, multiIds])
   const [activeTool, setActiveTool] = useState<Tool>('select')
   const [editingTextId, setEditingTextId] = useState<string | null>(null)
   const [maskBrushMode, setMaskBrushMode] = useState<MaskBrushMode>('hide')
   const [maskBrushSize, setMaskBrushSize] = useState(72)
+  const [maskBrushOpacity, setMaskBrushOpacity] = useState(100)
+  const [maskBrushFlow, setMaskBrushFlow] = useState(100)
+  const [paintColor, setPaintColor] = useState('#18181B')
+  const [paintBackground, setPaintBackground] = useState('#FFFFFF')
   const [selectionMode, setSelectionMode] = useState<'keep' | 'hide'>('keep')
   const [selectionTolerance, setSelectionTolerance] = useState(32)
   const [selectionFeather, setSelectionFeather] = useState(0)
@@ -245,6 +257,8 @@ function App() {
   const [future, setFuture] = useState<DesignLayer[][]>([])
   const [zoom, setZoom] = useState(68)
   const [mobileSheet, setMobileSheet] = useState<MobileSheet>(null)
+  const [quickStyleId, setQuickStyleId] = useState<string | null>(null)
+  useEffect(() => { setQuickStyleId(null) }, [selectedId, activeArtboardId])
   const [mouseSettings, setMouseSettings] = useState<MouseSettings>(readMouseSettings)
   const changeMouseSettings = (settings: MouseSettings) => {
     setMouseSettings(settings)
@@ -557,7 +571,9 @@ function App() {
 
   // Selecting a different circle or regular radial shape restores equal axes.
   // Record the adjustment so Undo can restore the previous dimensions.
-  const selectObject = (id: string | null): DesignLayer | null => {
+  const selectObject = (id: string | null, preserveMulti = false): DesignLayer | null => {
+    if (!preserveMulti) setMultiIds([])
+    if (id !== selectedId && activeTool === 'brush') setActiveTool('select')
     if (id !== editingTextId) finishTextEditing()
     const previousId = selectedIdRef.current
     selectedIdRef.current = id
@@ -571,6 +587,38 @@ function App() {
     commitLayers(current.map((item) => item.id === id ? squared : item))
     return squared
   }
+
+  const toggleMultiSelection = (id: string) => {
+    finishTextEditing()
+    const adding = !selectedIds.includes(id)
+    const next = adding ? [...selectedIds, id] : selectedIds.filter((item) => item !== id)
+    const target = layersRef.current.find((layer) => layer.id === id)
+    if (adding && target && !target.locked && needsEqualAxes(target) && Math.abs(target.width - target.height) >= 0.000001) commitLayers(layersRef.current.map((layer) => layer.id === id ? equalAxisBounds(layer) : layer))
+    setMultiIds(next)
+    const primary = next.includes(selectedId || '') && id !== selectedId ? selectedId : next[next.length - 1] || null
+    selectedIdRef.current = primary
+    setSelectedId(primary)
+  }
+
+  const updateSelection = useCallback((patch: Partial<DesignLayer>) => {
+    if (!selectedId) return
+    const current = layersRef.current
+    const selectedLayers = current.filter((layer) => selectedIds.includes(layer.id))
+    const sameType = selectedLayers.every((layer) => layer.type === selectedLayers[0]?.type)
+    const allowed = new Set(['x', 'y', 'width', 'height', 'fill', 'fillType', 'gradient', 'stroke', 'strokeWidth', 'strokeEnabled', 'opacity', 'rotation', 'blendMode'])
+    if (sameType) ['fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'underline', 'textAlign', 'textWrap', 'letterSpacing', 'lineHeight', 'radius', 'sides'].forEach((key) => allowed.add(key))
+    if (selectedIds.length < 2 || Object.keys(patch).some((key) => !allowed.has(key))) { updateLayer(selectedId, patch); return }
+    const primary = current.find((layer) => layer.id === selectedId)
+    if (!primary) return
+    const next = current.map((layer) => {
+      if (!selectedIds.includes(layer.id) || layer.locked) return layer
+      const changes = { ...patch }
+      if (patch.x !== undefined) changes.x = layer.x + patch.x - primary.x
+      if (patch.y !== undefined) changes.y = layer.y + patch.y - primary.y
+      return { ...layer, ...changes }
+    })
+    commitLayers(next)
+  }, [commitLayers, selectedId, selectedIds, updateLayer])
 
   const addMaskStroke = useCallback((id: string, stroke: MaskBrushStroke) => {
     const current = layersRef.current
@@ -607,22 +655,25 @@ function App() {
     commitLayers(current.map((layer) => layer.id === id ? { ...layer, maskStrokes: [] } : layer), 'Mask cleared')
   }, [commitLayers])
 
-  const activateMaskBrush = useCallback(() => {
-    const target = layersRef.current.find((layer) => layer.id === selectedId)
+  const activateMaskBrush = useCallback((id = selectedId) => {
+    const target = layersRef.current.find((layer) => layer.id === id)
     if (!target) {
       setActiveTool('object-select')
       showToast('Select an object to mask.')
       return
     }
+    if (target.isEmpty) { showToast('Add content to the empty layer before masking.'); return }
     if (target.locked) {
       showToast('Unlock the object before masking.')
       return
     }
     finishTextEditing()
+    setSelectedId(target.id)
+    if (!target.maskCreated && !target.maskStrokes?.length && !target.maskSelections?.length) updateLayer(target.id, { maskCreated: true })
     setMaskBrushMode('hide')
     setActiveTool('brush')
     setMobileSheet(null)
-  }, [finishTextEditing, selectedId, showToast])
+  }, [finishTextEditing, selectedId, showToast, updateLayer])
 
   const undo = useCallback(() => {
     if (!past.length) return
@@ -646,12 +697,15 @@ function App() {
 
   const deleteSelected = useCallback(() => {
     if (!selectedId) return
-    const layer = layersRef.current.find((item) => item.id === selectedId)
-    if (!layer || layer.locked) return
-    commitLayers(layersRef.current.filter((item) => item.id !== selectedId), 'Layer deleted')
+    const current = layersRef.current
+    const removable = current.filter((item) => selectedIds.includes(item.id) && !item.locked)
+    if (!removable.length) return
+    const ids = new Set(removable.map((item) => item.id))
+    commitLayers(current.filter((item) => !ids.has(item.id)), removable.length > 1 ? `${removable.length} layers deleted` : 'Layer deleted')
+    setMultiIds([])
     setSelectedId(null)
     setEditingTextId(null)
-  }, [commitLayers, selectedId])
+  }, [commitLayers, selectedId, selectedIds])
 
   const duplicateSelected = useCallback(() => {
     if (!selectedId) return
@@ -754,20 +808,29 @@ function App() {
       lineHeight: type === 'text' ? 1.1 : undefined,
       ...preset,
     }
+    const empty = layersRef.current.find((layer) => layer.id === selectedId && layer.isEmpty && !layer.locked)
     const created = needsEqualAxes(base) ? equalAxisBounds(base) : base
-    commitLayers([...layersRef.current, created])
+    if (empty) created.id = empty.id
+    commitLayers(empty ? layersRef.current.map((layer) => layer.id === empty.id ? created : layer) : [...layersRef.current, created])
     setSelectedId(created.id)
     setActiveTool('select')
     if (isCompact) setMobileSheet(null)
     return created.id
-  }, [commitLayers, documentMeta.height, documentMeta.width, isCompact])
+  }, [commitLayers, documentMeta.height, documentMeta.width, isCompact, selectedId])
 
-  const addDrawnPath = useCallback((rawPoints: Point[], type: 'path' | 'brush', closed = false) => {
+  const addEmptyLayer = () => {
+    const layer: DesignLayer = { id: makeId(), name: 'Empty layer', type: 'path', isEmpty: true, x: 0, y: 0, width: documentMeta.width, height: documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'transparent', stroke: 'transparent', strokeWidth: 0 }
+    commitLayers([...layersRef.current, layer], 'Empty layer added')
+    setSelectedId(layer.id)
+  }
+
+  const addDrawnPath = useCallback((rawPoints: Point[], type: 'path' | 'brush', closed = false, handles?: Point[]) => {
     if (rawPoints.length < 2) return
-    const minX = Math.min(...rawPoints.map((point) => point.x))
-    const minY = Math.min(...rawPoints.map((point) => point.y))
-    const maxX = Math.max(...rawPoints.map((point) => point.x))
-    const maxY = Math.max(...rawPoints.map((point) => point.y))
+    const boundsPoints = handles ? rawPoints.flatMap((point, index) => { const h = handles[index] || { x: 0, y: 0 }; return [point, { x: point.x + h.x, y: point.y + h.y }, { x: point.x - h.x, y: point.y - h.y }] }) : rawPoints
+    const minX = Math.min(...boundsPoints.map((point) => point.x))
+    const minY = Math.min(...boundsPoints.map((point) => point.y))
+    const maxX = Math.max(...boundsPoints.map((point) => point.x))
+    const maxY = Math.max(...boundsPoints.map((point) => point.y))
     const width = Math.max(maxX - minX, 2)
     const height = Math.max(maxY - minY, 2)
     const layer: DesignLayer = {
@@ -788,12 +851,34 @@ function App() {
       strokeWidth: type === 'brush' ? 16 : 4,
       radius: 0,
       points: rawPoints.map((point) => ({ x: (point.x - minX) / width, y: (point.y - minY) / height })),
+      penHandles: handles?.map((handle) => ({ x: handle.x / width, y: handle.y / height })),
       closed,
       smoothing: type === 'brush' ? 0.55 : 0,
     }
-    commitLayers([...layersRef.current, layer], type === 'brush' ? undefined : 'Path created')
+    const empty = layersRef.current.find((item) => item.id === selectedId && item.isEmpty && !item.locked)
+    if (empty) layer.id = empty.id
+    commitLayers(empty ? layersRef.current.map((item) => item.id === empty.id ? layer : item) : [...layersRef.current, layer], type === 'brush' ? undefined : 'Path created')
     setSelectedId(layer.id)
-  }, [commitLayers])
+  }, [commitLayers, selectedId])
+
+  const addPaintStroke = (points: Point[], size: number, opacity: number, flow: number, color: string) => {
+    if (!points.length || opacity <= 0 || flow <= 0) return
+    const current = layersRef.current
+    const chosen = current.find((layer) => layer.id === selectedId)
+    if ((chosen?.isEmpty || chosen?.paintStrokes) && chosen.locked) { showToast('Unlock the layer before painting.'); return }
+    const target: DesignLayer = chosen && (chosen.isEmpty || chosen.paintStrokes) ? chosen : { id: makeId(), name: 'Paint layer', type: 'path', x: 0, y: 0, width: documentMeta.width, height: documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'transparent', stroke: 'transparent', strokeWidth: 0 }
+    const angle = -target.rotation * Math.PI / 180, cos = Math.cos(angle), sin = Math.sin(angle)
+    const cx = target.x + target.width / 2, cy = target.y + target.height / 2
+    const normalized = points.map((point) => {
+      const dx = point.x - cx, dy = point.y - cy
+      const x = cx + dx * cos - dy * sin, y = cy + dx * sin + dy * cos
+      return { x: ((target.flipX ? 2 * cx - x : x) - target.x) / Math.max(1, target.width), y: ((target.flipY ? 2 * cy - y : y) - target.y) / Math.max(1, target.height) }
+    })
+    const stroke = { points: normalized, size: size / Math.max(1, target.width, target.height), mode: 'hide' as const, opacity: opacity / 100, flow: flow / 100, color }
+    const updated = { ...target, isEmpty: false, name: target.isEmpty ? 'Paint layer' : target.name, paintStrokes: [...(target.paintStrokes || []), stroke] }
+    commitLayers(current.some((layer) => layer.id === target.id) ? current.map((layer) => layer.id === target.id ? updated : layer) : [...current, updated])
+    setSelectedId(target.id)
+  }
 
   const importImages = async (files: File[], point?: Point) => {
     const targetArtboard = activeArtboardId
@@ -885,20 +970,20 @@ function App() {
         if (event.key === 'ArrowRight') patch.x = layer.x + step
         if (event.key === 'ArrowUp') patch.y = layer.y - step
         if (event.key === 'ArrowDown') patch.y = layer.y + step
-        updateLayer(selectedId, patch)
+        updateSelection(patch)
       } else if (event.key.toLowerCase() === 'v') setActiveTool('select')
       else if (event.key.toLowerCase() === 'q') setActiveTool('object-select')
       else if (event.key.toLowerCase() === 'h') setActiveTool('hand')
       else if (event.key.toLowerCase() === 'r') setActiveTool('rectangle')
       else if (event.key.toLowerCase() === 't') setActiveTool('text')
       else if (event.key.toLowerCase() === 'p') setActiveTool('pen')
-      else if (event.key.toLowerCase() === 'b') activateMaskBrush()
+      else if (event.key.toLowerCase() === 'b' && activeTool !== 'brush') { finishTextEditing(); setActiveTool('paint-brush') }
       else if (event.key.toLowerCase() === 'z') setActiveTool('zoom')
       else if (event.key.toLowerCase() === 'u') setActiveTool('polygon')
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, redo, selectedId, undo, updateLayer])
+  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, finishTextEditing, redo, selectedId, undo, updateSelection])
 
   const createDesign = (meta: DesignDocument, name: string) => {
     const toPx = (value: number) => {
@@ -1005,6 +1090,10 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
+  const showQuickStyle = isCompact && !multiSelectMode && activeTool !== 'pen' && activeTool !== 'brush' && activeTool !== 'paint-brush' && selected && selected.id === quickStyleId && !selected.locked
+  const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
+  const showMultiOptions = isCompact && multiSelectMode
+  const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
     if (action === 'select' || action === 'mask-done') {
       finishTextEditing()
@@ -1014,16 +1103,19 @@ function App() {
       setActiveTool('object-select')
     } else if (action === 'polygon-mask' || action === 'wand-mask') activateSelection(action)
     else if (action === 'mask-brush') activateMaskBrush()
+    else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null) }
     else if (action === 'shapes') setMobileSheet('shapes')
-    else if (action === 'text') { setSelectedId(null); setActiveTool('text') }
+    else if (action === 'text') { if (!selected?.isEmpty) setSelectedId(null); setActiveTool('text') }
     else if (action === 'image') imageInputRef.current?.click()
     else if (action === 'extract-palette') { setMobileSheet('properties'); void extractSelectedPalette() }
     else if (action === 'layers') setMobileSheet('layers')
     else if (action === 'more') setMobileSheet('more')
-    else if (action === 'properties' || action === 'align' || action === 'arrange') setMobileSheet('properties')
+    else if ((action === 'properties' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) { setMobileSheet(null); setQuickStyleId((id) => action === 'properties' && id === selected.id ? null : selected.id) }
+    else if (action === 'fill' || action === 'align' || action === 'arrange') setMobileSheet('properties')
     else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
     else if (action === 'finish-text') finishTextEditing()
     else if (action === 'corners') setActiveTool('corner')
+    else if (action === 'clip' && selected && !selected.locked && (selected.clipToBelow || layers.findIndex((layer) => layer.id === selected.id) > 0)) updateLayer(selected.id, { clipToBelow: !selected.clipToBelow })
     else if (action === 'duplicate') duplicateSelected()
     else if (action === 'delete') deleteSelected()
     else if (action === 'crop' && selected?.type === 'image') {
@@ -1092,6 +1184,7 @@ function App() {
           activeTool={activeTool}
           onTool={(tool) => {
             if (tool === 'image') imageInputRef.current?.click()
+            else if (tool === 'paint-brush' && activeTool === 'brush') return
             else if (tool === 'brush') activateMaskBrush()
             else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
             else {
@@ -1111,20 +1204,31 @@ function App() {
           <LayersPanel
             layers={layers}
             selectedId={selectedId}
-            onSelect={selectObject}
+            selectedIds={selectedIds}
+            multiSelectMode={multiSelectMode}
+            onMultiSelectMode={(enabled) => { setMultiSelectMode(enabled); if (enabled) setActiveTool('select') }}
+            onToggleMulti={toggleMultiSelection}
+            onClearSelection={() => selectObject(null)}
+            onModifyLayer={(id) => { setMultiSelectMode(false); selectObject(id, selectedIds.length > 1 && selectedIds.includes(id)) }}
+            maskEditingId={activeTool === 'brush' ? selectedId : null}
+            onSelect={toggleMultiSelection}
+            onEditMask={(id) => activateMaskBrush(id)}
+            onToggleClip={(layer) => { if (!layer.locked) updateLayer(layer.id, { clipToBelow: !layer.clipToBelow }) }}
             onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
             onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
             onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
-            onAdd={() => addLayer('rectangle')}
+            onAdd={addEmptyLayer}
+            onAddAsset={(type, preset) => addLayer(type, undefined, preset)}
             onDuplicate={duplicateSelected}
             onDelete={deleteSelected}
+            onDeleteLayer={(id) => { const current = layersRef.current; const target = current.find((layer) => layer.id === id); if (target && !target.locked) commitLayers(current.filter((layer) => layer.id !== id), 'Layer deleted') }}
             onMoveUp={() => reorderSelected('up')}
             onMoveDown={() => reorderSelected('down')}
             onReorder={reorderLayersFromPanel}
           />
         </aside>
 
-        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''}`} aria-label="Design canvas"
+        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''} ${showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions ? 'has-quick-style' : ''}`} aria-label="Design canvas"
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingFiles(true) } }}
           onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false) }}
           onDrop={(event) => {
@@ -1150,11 +1254,30 @@ function App() {
             onAdd={addArtboard}
             onDelete={() => deleteArtboard()}
           />
+          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : undefined}><span>Tap layers to select</span><button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
+          {showQuickStyle && <QuickStyleToolbar
+            layer={selected}
+            onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
+            onClose={() => setQuickStyleId(null)}
+            onMore={() => { finishTextEditing(); setMobileSheet('properties') }}
+          />}
+          {showBrushOptions && <div className="quick-style-wrap"><div className="quick-style brush-quick-settings" role="group" aria-label="Mask brush settings">
+            {activeTool === 'paint-brush' && <PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} />}
+            <MaskBrushSettings prefix={activeTool === 'paint-brush' ? 'Brush' : 'Mask brush'} opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} />
+          </div></div>}
+          {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
           <Canvas
             artboardRef={artboardRef}
+            quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions)}
             documentMeta={documentMeta}
             layers={layers}
             selected={selected}
+            selectedIds={selectedIds}
+            multiSelectMode={multiSelectMode}
+            onToggleMulti={toggleMultiSelection}
+            compactPenControls={showPenOptions}
+            onMoveSelectionLive={(snapshot, ids, dx, dy) => { const next = snapshot.map((layer) => ids.includes(layer.id) && !layer.locked ? { ...layer, x: layer.x + dx, y: layer.y + dy } : layer); layersRef.current = next; setLayers(next) }}
+            onRestoreSelection={(snapshot) => { layersRef.current = snapshot; setLayers(snapshot) }}
             activeTool={activeTool}
             zoom={zoom}
             mouseSettings={mouseSettings}
@@ -1165,14 +1288,18 @@ function App() {
             editingTextId={editingTextId}
             maskBrushMode={maskBrushMode}
             maskBrushSize={maskBrushSize}
+            maskBrushOpacity={maskBrushOpacity}
+            maskBrushFlow={maskBrushFlow}
+            paintColor={paintColor}
+            onAddPaintStroke={addPaintStroke}
             selectionMode={selectionMode} onSelectionMode={setSelectionMode}
             selectionTolerance={selectionTolerance} onSelectionTolerance={setSelectionTolerance}
             selectionFeather={selectionFeather} onSelectionFeather={setSelectionFeather}
             onApplyMaskSelection={addMaskSelection} onSelectionError={showToast} onFinishSelection={() => setActiveTool('select')}
             pickingColor={Boolean(colorPick)}
             onPickColor={pickCanvasColor}
-            onSelect={(id) => {
-              const layer = selectObject(id)
+            onSelect={(id, preserveMulti) => {
+              const layer = selectObject(id, preserveMulti)
               if (id === null && ['object-select', 'corner', 'crop', 'brush'].includes(activeTool)) setActiveTool('select')
               return layer
             }}
@@ -1200,6 +1327,10 @@ function App() {
               activeTool={activeTool}
               maskBrushMode={maskBrushMode}
               maskBrushSize={maskBrushSize}
+              maskBrushOpacity={maskBrushOpacity}
+              maskBrushFlow={maskBrushFlow}
+              onMaskOpacity={setMaskBrushOpacity}
+              onMaskFlow={setMaskBrushFlow}
               onOpenProperties={() => setMobileSheet('properties')}
               onOpenMask={() => setMobileSheet('mask')}
               onPolygonMask={() => activateSelection('polygon-mask')}
@@ -1226,7 +1357,7 @@ function App() {
           <PropertiesPanel
             selected={selected}
             documentMeta={documentMeta}
-            onUpdate={(patch) => selected && updateLayer(selected.id, patch)}
+            onUpdate={(patch) => selected && updateSelection(patch)}
             onPickColor={startColorPick}
             imagePalette={imagePalette}
             extractingPalette={extractingPalette}
@@ -1261,6 +1392,7 @@ function App() {
         activeTool={activeTool}
         selected={selected}
         editingText={Boolean(editingTextId)}
+        canClip={Boolean(selected && !selected.locked && (selected.clipToBelow || layers.findIndex((layer) => layer.id === selected.id) > 0))}
         maskBrushMode={maskBrushMode}
         onAction={handleMobileToolAction}
       />
@@ -1272,13 +1404,24 @@ function App() {
             <LayersPanel
               layers={layers}
               selectedId={selectedId}
-              onSelect={(id) => { selectObject(id); setMobileSheet(null) }}
+              selectedIds={selectedIds}
+              multiSelectMode={multiSelectMode}
+              onMultiSelectMode={(enabled) => { setMultiSelectMode(enabled); if (enabled) setActiveTool('select') }}
+              onToggleMulti={toggleMultiSelection}
+              onClearSelection={() => selectObject(null)}
+              onModifyLayer={(id) => { setMultiSelectMode(false); selectObject(id, selectedIds.length > 1 && selectedIds.includes(id)); setMobileSheet('properties') }}
+              maskEditingId={activeTool === 'brush' ? selectedId : null}
+              onSelect={toggleMultiSelection}
+              onEditMask={(id) => activateMaskBrush(id)}
+              onToggleClip={(layer) => { if (!layer.locked) updateLayer(layer.id, { clipToBelow: !layer.clipToBelow }) }}
               onToggleVisible={(layer) => updateLayer(layer.id, { visible: !layer.visible })}
               onToggleLock={(layer) => updateLayer(layer.id, { locked: !layer.locked })}
               onToggleBlur={(layer) => layer.blur && updateLayer(layer.id, { blur: { ...layer.blur, enabled: !layer.blur.enabled } })}
-              onAdd={() => addLayer('rectangle')}
+              onAdd={addEmptyLayer}
+              onAddAsset={(type, preset) => { addLayer(type, undefined, preset); setMobileSheet(null) }}
               onDuplicate={duplicateSelected}
               onDelete={deleteSelected}
+              onDeleteLayer={(id) => { const current = layersRef.current; const target = current.find((layer) => layer.id === id); if (target && !target.locked) commitLayers(current.filter((layer) => layer.id !== id), 'Layer deleted') }}
               onMoveUp={() => reorderSelected('up')}
               onMoveDown={() => reorderSelected('down')}
               onReorder={reorderLayersFromPanel}
@@ -1289,7 +1432,7 @@ function App() {
             <PropertiesPanel
               selected={selected}
               documentMeta={documentMeta}
-              onUpdate={(patch) => selected && updateLayer(selected.id, patch)}
+              onUpdate={(patch) => selected && updateSelection(patch)}
               onPickColor={startColorPick}
               imagePalette={imagePalette}
               extractingPalette={extractingPalette}
@@ -1339,7 +1482,7 @@ function App() {
                 setActiveTool('crop')
                 setMobileSheet(null)
               }}
-              onBrushMask={activateMaskBrush}
+              onBrushMask={() => activateMaskBrush()}
               onPolygonMask={() => activateSelection('polygon-mask')}
               onWandMask={() => activateSelection('wand-mask')}
               onClearPaintMask={() => clearPaintMask(selected.id)}
@@ -1356,6 +1499,7 @@ function App() {
                 else if (action === 'mouse') { setMobileSheet('mouse'); return }
                 else if (action === 'settings') { setMobileSheet('properties'); return }
                 else if (action === 'brush') { activateMaskBrush(); return }
+                else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null); return }
                 else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner') setActiveTool(action)
                 setMobileSheet(null)
@@ -1563,7 +1707,8 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'star', label: 'Star', icon: <Star /> },
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
-    { id: 'brush', label: 'Mask brush', shortcut: 'B', icon: <Brush /> },
+    { id: 'paint-brush', label: 'Brush', shortcut: 'B', icon: <Brush /> },
+    { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
     { id: 'polygon-mask', label: 'Polygonal selection', icon: <LassoSelect /> },
     { id: 'wand-mask', label: 'Magic wand', icon: <WandSparkles /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
@@ -1592,13 +1737,24 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
 interface LayersPanelProps {
   layers: DesignLayer[]
   selectedId: string | null
+  selectedIds: string[]
+  multiSelectMode: boolean
+  onMultiSelectMode: (enabled: boolean) => void
+  onToggleMulti: (id: string) => void
+  onClearSelection: () => void
+  onModifyLayer: (id: string) => void
+  maskEditingId: string | null
   onSelect: (id: string) => void
+  onEditMask: (id: string) => void
+  onToggleClip: (layer: DesignLayer) => void
   onToggleVisible: (layer: DesignLayer) => void
   onToggleLock: (layer: DesignLayer) => void
   onToggleBlur: (layer: DesignLayer) => void
   onAdd: () => void
+  onAddAsset: (type: LayerType, preset?: Partial<DesignLayer>) => void
   onDuplicate: () => void
   onDelete: () => void
+  onDeleteLayer: (id: string) => void
   onMoveUp: () => void
   onMoveDown: () => void
   onReorder: (topToBottomIds: string[]) => void
@@ -1607,6 +1763,8 @@ interface LayersPanelProps {
 
 function LayersPanel(props: LayersPanelProps) {
   const [query, setQuery] = useState('')
+  const [panelTab, setPanelTab] = useState<'layers' | 'assets'>('layers')
+  const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dragOrder, setDragOrder] = useState<string[] | null>(null)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [reorderAnnouncement, setReorderAnnouncement] = useState('')
@@ -1715,24 +1873,31 @@ function LayersPanel(props: LayersPanelProps) {
         </div>
       )}
       <div className="panel-tabs" role="tablist">
-        <button className="panel-tab active" role="tab" aria-selected="true">Layers</button>
-        <button className="panel-tab" role="tab" aria-selected="false">Assets</button>
+        <button className={`panel-tab ${panelTab === 'layers' ? 'active' : ''}`} role="tab" aria-selected={panelTab === 'layers'} onClick={() => setPanelTab('layers')}>Layers</button>
+        <button className={`panel-tab ${panelTab === 'assets' ? 'active' : ''}`} role="tab" aria-selected={panelTab === 'assets'} onClick={() => setPanelTab('assets')}>Assets</button>
       </div>
+      {panelTab === 'assets' ? <div className="layers-assets"><ShapesGrid onAdd={(type, _point, preset) => props.onAddAsset(type, preset)} /></div> : <>
       <label className="search-field">
         <Search size={15} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search layers" aria-label="Search layers" />
         {query && <button onClick={() => setQuery('')} aria-label="Clear search"><X size={14} /></button>}
       </label>
+      <div className="layer-selection-controls">
+        <span>{props.selectedIds.length ? `${props.selectedIds.length} selected` : 'Tap layers to select'}</span>
+        <button disabled={!props.selectedIds.length} onClick={props.onClearSelection}>Clear</button>
+        <button aria-pressed={props.multiSelectMode} onClick={() => props.onMultiSelectMode(!props.multiSelectMode)}>{props.multiSelectMode ? 'Done selecting on canvas' : 'Select on canvas'}</button>
+      </div>
       <div className="layer-order-hint"><GripVertical size={12} /><span>{query ? 'Clear search to reorder' : 'Drag layers to reorder'}</span></div>
       <div ref={listRef} className={`layer-list ${draggingId ? 'is-reordering' : ''}`} role="listbox" aria-label="Canvas layers">
         {visibleLayers.length ? visibleLayers.map((layer) => (
           <div
             key={layer.id}
             role="option"
-            aria-selected={props.selectedId === layer.id}
+            aria-selected={props.selectedIds.includes(layer.id)}
             data-layer-id={layer.id}
-            className={`layer-row ${props.selectedId === layer.id ? 'selected' : ''} ${!layer.visible ? 'muted' : ''} ${draggingId === layer.id ? 'dragging' : ''}`}
-            onClick={() => props.onSelect(layer.id)}
+            className={`layer-row ${props.selectedIds.includes(layer.id) ? 'selected' : ''} ${!layer.visible ? 'muted' : ''} ${draggingId === layer.id ? 'dragging' : ''}`}
+            onClick={(event) => { if (event.shiftKey || event.ctrlKey || event.metaKey) props.onToggleMulti(layer.id); else props.onSelect(layer.id) }}
+            onContextMenu={(event) => { event.preventDefault(); setRowMenu({ id: layer.id, x: Math.min(event.clientX, window.innerWidth - 170), y: Math.min(event.clientY, window.innerHeight - 150) }) }}
           >
             <button
               className="row-grip"
@@ -1744,7 +1909,8 @@ function LayersPanel(props: LayersPanelProps) {
               onKeyDown={(event) => reorderWithKeyboard(event, layer)}
             ><GripVertical size={14} /></button>
             <LayerThumbnail layer={layer} />
-            <span className="layer-name">{layer.name}</span>
+            {(layer.maskCreated || Boolean(layer.maskStrokes?.length || layer.maskSelections?.length)) && <button className={`mask-thumbnail ${props.maskEditingId === layer.id ? 'active' : ''}`} aria-pressed={props.maskEditingId === layer.id} aria-label={`Edit mask for ${layer.name}`} title="Edit mask" onClick={(event) => { event.stopPropagation(); props.onEditMask(layer.id) }}><MaskThumbnail layer={layer} /></button>}
+            <span className="layer-name">{layer.clipToBelow ? '↳ ' : ''}{layer.name}</span>
             {layer.blur && <button className={`row-action blur-toggle ${layer.blur.enabled ? 'is-active' : ''}`} aria-label={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur for ${layer.name}`} aria-pressed={layer.blur.enabled} title={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur`} onClick={(event) => { event.stopPropagation(); props.onToggleBlur(layer) }}><Sparkles size={14} /></button>}
             <button className="row-action" aria-label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`} onClick={(event) => { event.stopPropagation(); props.onToggleVisible(layer) }}>
               {layer.visible ? <Eye size={15} /> : <EyeOff size={15} />}
@@ -1754,22 +1920,50 @@ function LayersPanel(props: LayersPanelProps) {
             </button>
           </div>
         )) : (
-          <div className="empty-layers"><Layers3 size={28} /><p>{query ? 'No layers match your search.' : 'No layers yet.'}</p><button className="button secondary" onClick={props.onAdd}>Add a shape</button></div>
+          <div className="empty-layers"><Layers3 size={28} /><p>{query ? 'No layers match your search.' : 'No layers yet.'}</p><button className="button secondary" onClick={props.onAdd}>Add a layer</button></div>
         )}
       </div>
+      {rowMenu && <div className="layer-row-menu" role="menu" style={{ left: rowMenu.x, top: rowMenu.y }}>
+        <button role="menuitem" onClick={() => { if (!props.selectedIds.includes(rowMenu.id)) props.onToggleMulti(rowMenu.id); props.onMultiSelectMode(true); setRowMenu(null) }}>Select</button>
+        <button role="menuitem" onClick={() => { props.onModifyLayer(rowMenu.id); setRowMenu(null) }}>Modify</button>
+        <button role="menuitem" onClick={() => { if (props.selectedIds.includes(rowMenu.id)) props.onDelete(); else { const target = props.layers.find((layer) => layer.id === rowMenu.id); if (target && !target.locked) props.onDeleteLayer(rowMenu.id) } setRowMenu(null) }}>Delete</button>
+        <button role="menuitem" onClick={() => setRowMenu(null)}>Close</button>
+      </div>}
       <span className="visually-hidden" role="status" aria-live="polite">{reorderAnnouncement}</span>
+      {(() => {
+        const selectedLayer = props.layers.find((layer) => layer.id === props.selectedId)
+        const canClip = selectedLayer && (selectedLayer.clipToBelow || props.layers.findIndex((layer) => layer.id === selectedLayer.id) > 0)
+        return <button className="layer-clip-action" onClick={() => selectedLayer && props.onToggleClip(selectedLayer)} disabled={!canClip || selectedLayer?.locked}><Layers3 size={15} />{selectedLayer?.clipToBelow ? 'Release clipping mask' : 'Create clipping mask'}</button>
+      })()}
       <div className="panel-footer-actions">
+        <IconButton label="Add layer" onClick={props.onAdd}><Plus /></IconButton>
         <IconButton label="Duplicate" shortcut="Ctrl D" onClick={props.onDuplicate} disabled={!props.selectedId}><Copy /></IconButton>
         <IconButton label="Move layer up" onClick={props.onMoveUp} disabled={!props.selectedId}><ArrowUp /></IconButton>
         <IconButton label="Move layer down" onClick={props.onMoveDown} disabled={!props.selectedId}><ArrowDown /></IconButton>
         <span className="footer-spacer" />
         <IconButton label="Delete layer" onClick={props.onDelete} disabled={!props.selectedId} className="danger-icon"><Trash2 /></IconButton>
       </div>
+      </>}
     </div>
   )
 }
 
+function MaskThumbnail({ layer }: { layer: DesignLayer }) {
+  const instance = useId().replace(/:/g, '')
+  const prefix = `thumb-${instance}`
+  return <svg viewBox={`${layer.x} ${layer.y} ${Math.max(1, layer.width)} ${Math.max(1, layer.height)}`} preserveAspectRatio="none" aria-hidden="true">
+    <defs>{layer.maskSelections?.map((selection, index) => <mask key={index} id={`${prefix}-${index}`} maskUnits="userSpaceOnUse" x={layer.x} y={layer.y} width={layer.width} height={layer.height}>
+      <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} fill={selection.mode === 'keep' ? 'black' : 'white'} />
+      {selection.kind === 'polygon' ? <polygon points={selection.points.map((point) => `${layer.x + point.x * layer.width},${layer.y + point.y * layer.height}`).join(' ')} fill={selection.mode === 'keep' ? 'white' : 'black'} /> : <image href={selection.image} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="none" />}
+    </mask>)}</defs>
+    <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} fill="black" />
+    {(layer.maskSelections || []).reduce<ReactNode>((node, _selection, index) => <g mask={`url(#${prefix}-${index})`}>{node}</g>, <rect x={layer.x} y={layer.y} width={layer.width} height={layer.height} fill="white" />)}
+    {layer.maskStrokes?.map((stroke, index) => <MaskStrokeElement key={index} layer={layer} stroke={stroke} />)}
+  </svg>
+}
+
 function LayerThumbnail({ layer }: { layer: DesignLayer }) {
+  if (layer.isEmpty) return <span className="layer-thumbnail icon"><Layers3 size={15} /></span>
   if (layer.type === 'text') return <span className="layer-thumbnail icon"><Type size={15} /></span>
   if (layer.type === 'image') return <span className="layer-thumbnail image" style={{ backgroundImage: `url(${layer.src})` }} />
   if (layer.type === 'ellipse') return <span className="layer-thumbnail icon"><Circle size={15} style={{ color: layer.fill }} /></span>
@@ -1782,10 +1976,17 @@ function LayerThumbnail({ layer }: { layer: DesignLayer }) {
 }
 
 interface CanvasProps {
+  quickStyleOpen: boolean
   artboardRef: React.RefObject<SVGSVGElement>
   documentMeta: DesignDocument
   layers: DesignLayer[]
   selected: DesignLayer | null
+  selectedIds: string[]
+  multiSelectMode: boolean
+  onToggleMulti: (id: string) => void
+  compactPenControls: boolean
+  onMoveSelectionLive: (snapshot: DesignLayer[], ids: string[], dx: number, dy: number) => void
+  onRestoreSelection: (snapshot: DesignLayer[]) => void
   activeTool: Tool
   zoom: number
   mouseSettings: MouseSettings
@@ -1796,6 +1997,10 @@ interface CanvasProps {
   editingTextId: string | null
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
+  maskBrushOpacity: number
+  maskBrushFlow: number
+  paintColor: string
+  onAddPaintStroke: (points: Point[], size: number, opacity: number, flow: number, color: string) => void
   selectionMode: 'keep' | 'hide'
   onSelectionMode: (mode: 'keep' | 'hide') => void
   selectionTolerance: number
@@ -1807,9 +2012,9 @@ interface CanvasProps {
   onFinishSelection: () => void
   pickingColor: boolean
   onPickColor: (point: Point) => void
-  onSelect: (id: string | null) => DesignLayer | null
+  onSelect: (id: string | null, preserveMulti?: boolean) => DesignLayer | null
   onAddLayer: (type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => string
-  onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean) => void
+  onAddPath: (points: Point[], type: 'path' | 'brush', closed?: boolean, handles?: Point[]) => void
   onAddMaskStroke: (id: string, stroke: MaskBrushStroke) => void
   onBeginTextEdit: (id: string) => void
   onCommitText: (id: string, patch: Partial<DesignLayer>) => void
@@ -1892,10 +2097,15 @@ function Canvas(props: CanvasProps) {
   }, [props.pickingColor, props.documentMeta.width, props.documentMeta.height])
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
   const draftPointsRef = useRef<Point[]>([])
+  const [draftHandles, setDraftHandles] = useState<Point[]>([])
+  const [penMode, setPenMode] = useState<'straight' | 'curve'>('straight')
+  const draftHandlesRef = useRef<Point[]>([])
+  const penCleanupRef = useRef<(() => void) | null>(null)
+  const setPenDraft = (points: Point[], handles: Point[]) => { draftPointsRef.current = points; draftHandlesRef.current = handles; setDraftPoints(points); setDraftHandles(handles) }
   zoomRef.current = props.zoom
   useEffect(() => { layersRef.current = props.layers }, [props.layers])
   useEffect(() => { draftPointsRef.current = draftPoints }, [draftPoints])
-  useEffect(() => { setDraftPoints([]) }, [props.activeTool])
+  useEffect(() => { draftPointsRef.current = []; draftHandlesRef.current = []; setDraftPoints([]); setDraftHandles([]) }, [props.activeTool])
   useEffect(() => {
     const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight })
     window.addEventListener('resize', onResize)
@@ -1904,6 +2114,7 @@ function Canvas(props: CanvasProps) {
   useEffect(() => () => {
     transformCleanupRef.current?.()
     maskStrokeCleanupRef.current?.()
+    penCleanupRef.current?.()
     cancelLongPressRef.current?.()
     mousePanCleanupRef.current?.()
     if (wheelZoomTimerRef.current !== null) window.clearTimeout(wheelZoomTimerRef.current)
@@ -1974,8 +2185,8 @@ function Canvas(props: CanvasProps) {
 
   const finishPenPath = useCallback((closed = false) => {
     const points = draftPointsRef.current
-    if (points.length >= 2) onAddPath(points, 'path', closed)
-    setDraftPoints([])
+    if (points.length >= 2) onAddPath(points, 'path', closed, draftHandlesRef.current)
+    draftPointsRef.current = []; draftHandlesRef.current = []; setDraftPoints([]); setDraftHandles([])
   }, [onAddPath])
 
   useEffect(() => {
@@ -1985,7 +2196,7 @@ function Canvas(props: CanvasProps) {
         event.preventDefault()
         finishPenPath(false)
       }
-      if (event.key === 'Escape') setDraftPoints([])
+      if (event.key === 'Escape') { draftPointsRef.current = []; draftHandlesRef.current = []; setDraftPoints([]); setDraftHandles([]) }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
@@ -2092,6 +2303,7 @@ function Canvas(props: CanvasProps) {
     lastTextTapRef.current = null
     transformCleanupRef.current?.()
     maskStrokeCleanupRef.current?.()
+    penCleanupRef.current?.()
     cancelLongPressRef.current?.()
     setSmartGuides({})
     const rect = svg.getBoundingClientRect()
@@ -2207,7 +2419,7 @@ function Canvas(props: CanvasProps) {
     event.stopPropagation()
     event.preventDefault()
     transformCleanupRef.current?.()
-    const selectedLayer = props.onSelect(layer.id) || layer
+    const selectedLayer = props.onSelect(layer.id, props.selectedIds.length > 1 && props.selectedIds.includes(layer.id)) || layer
     // Selection may have changed the bounds. Use those bounds for the entire
     // gesture, including cancellation and the transform's undo snapshot.
     layersRef.current = layersRef.current.map((item) => item.id === selectedLayer.id ? selectedLayer : item)
@@ -2230,10 +2442,10 @@ function Canvas(props: CanvasProps) {
       state.moved = state.moved || Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5
       if (state.mode === 'move') {
         const position = snapMove(state.original, state.original.x + dx, state.original.y + dy, rect)
-        props.onUpdateLive(state.id, {
-          x: clamp(position.x, -state.original.width + 10, props.documentMeta.width - 10),
-          y: clamp(position.y, -state.original.height + 10, props.documentMeta.height - 10),
-        })
+        const x = clamp(position.x, -state.original.width + 10, props.documentMeta.width - 10)
+        const y = clamp(position.y, -state.original.height + 10, props.documentMeta.height - 10)
+        if (props.selectedIds.length > 1 && props.selectedIds.includes(state.id)) props.onMoveSelectionLive(state.snapshot, props.selectedIds, x - state.original.x, y - state.original.y)
+        else props.onUpdateLive(state.id, { x, y })
       } else if (state.mode === 'resize') {
         const original = state.original
         const handle = state.handle || 'se'
@@ -2321,6 +2533,7 @@ function Canvas(props: CanvasProps) {
       const state = transformRef.current
       if (state?.pointerId === pointerId) {
         if (state.moved && commit) props.onCommitSnapshot(state.snapshot)
+        else if (state.moved && state.mode === 'move' && props.selectedIds.length > 1 && props.selectedIds.includes(state.id)) props.onRestoreSelection(state.snapshot)
         else if (state.moved) props.onUpdateLive(state.id, state.original)
         lastTextTapRef.current = commit && !state.moved && state.mode === 'move' && state.original.type === 'text'
           ? { id: state.id, time: Date.now(), x: state.startClientX, y: state.startClientY, pointerType: event.pointerType }
@@ -2373,7 +2586,7 @@ function Canvas(props: CanvasProps) {
     const finish = (commit: boolean) => {
       if (finished) return
       finished = true
-      if (commit && points.length > 1) {
+      if (commit && points.length > 0 && props.maskBrushOpacity > 0 && props.maskBrushFlow > 0) {
         const angle = -layer.rotation * Math.PI / 180
         const cos = Math.cos(angle)
         const sin = Math.sin(angle)
@@ -2395,6 +2608,8 @@ function Canvas(props: CanvasProps) {
           points: normalized,
           size: props.maskBrushSize / Math.max(1, Math.max(layer.width, layer.height)),
           mode: props.maskBrushMode,
+          opacity: props.maskBrushOpacity / 100,
+          flow: props.maskBrushFlow / 100,
         })
       }
       setDraftPoints([])
@@ -2413,6 +2628,35 @@ function Canvas(props: CanvasProps) {
     window.addEventListener('pointermove', onMove, { passive: false })
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onCancel)
+  }
+
+  const startPaintStroke = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (pinchRef.current) return
+    event.preventDefault()
+    maskStrokeCleanupRef.current?.()
+    const pointerId = event.pointerId
+    const points = [pointerToCanvas(event.clientX, event.clientY)]
+    setDraftPoints(points)
+    const move = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId || pinchRef.current) return
+      next.preventDefault()
+      const point = pointerToCanvas(next.clientX, next.clientY)
+      if (Math.hypot(point.x - points[points.length - 1].x, point.y - points[points.length - 1].y) < 2) return
+      points.push(point); setDraftPoints([...points])
+    }
+    let finished = false
+    const finish = (commit: boolean) => {
+      if (finished) return
+      finished = true
+      if (commit) props.onAddPaintStroke(points, props.maskBrushSize, props.maskBrushOpacity, props.maskBrushFlow, props.paintColor)
+      setDraftPoints([])
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel)
+      maskStrokeCleanupRef.current = null
+    }
+    const up = (next: PointerEvent) => { if (next.pointerId === pointerId) finish(true) }
+    const cancel = (next: PointerEvent) => { if (next.pointerId === pointerId) finish(false) }
+    maskStrokeCleanupRef.current = () => finish(false)
+    window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', cancel)
   }
 
   const startGuideDrag = (event: ReactPointerEvent, guide: CanvasGuide) => {
@@ -2498,6 +2742,7 @@ function Canvas(props: CanvasProps) {
   }
 
   const onLayerPointerDown = (event: ReactPointerEvent<SVGGElement>, layer: DesignLayer) => {
+    if (props.activeTool === 'select' && (event.shiftKey || event.ctrlKey || event.metaKey || props.multiSelectMode)) { event.preventDefault(); event.stopPropagation(); props.onToggleMulti(layer.id); return }
     if (props.activeTool === 'select' && layer.type === 'text' && !layer.locked && !pinchRef.current && (event.pointerType !== 'touch' || touchPointersRef.current.size === 1)) {
       const previous = lastTextTapRef.current
       if (previous && previous.pointerType === event.pointerType && previous.id === layer.id && Date.now() - previous.time < 400 && Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 30) {
@@ -2534,6 +2779,7 @@ function Canvas(props: CanvasProps) {
       event.preventDefault()
       return
     }
+    if (props.activeTool === 'paint-brush') { startPaintStroke(event); return }
     if (props.activeTool === 'brush') {
       startMaskStroke(event)
       return
@@ -2554,10 +2800,29 @@ function Canvas(props: CanvasProps) {
       if (existing.length >= 3 && Math.hypot(point.x - existing[0].x, point.y - existing[0].y) <= closeThreshold) {
         finishPenPath(true)
       } else if (event.detail >= 2 && existing.length >= 1) {
-        props.onAddPath([...existing, point], 'path', false)
-        setDraftPoints([])
+        props.onAddPath([...existing, point], 'path', false, [...draftHandlesRef.current, { x: 0, y: 0 }])
+        setPenDraft([], [])
       } else {
-        setDraftPoints((points) => [...points, point])
+        const index = existing.length
+        setPenDraft([...existing, point], [...draftHandlesRef.current, { x: 0, y: 0 }])
+        if (penMode === 'straight') return
+        const pointerId = event.pointerId
+        const move = (moveEvent: PointerEvent) => {
+          if (moveEvent.pointerId !== pointerId || pinchRef.current) return
+          moveEvent.preventDefault()
+          const end = pointerToCanvas(moveEvent.clientX, moveEvent.clientY)
+          const handles = [...draftHandlesRef.current]
+          handles[index] = { x: end.x - point.x, y: end.y - point.y }
+          draftHandlesRef.current = handles
+          setDraftHandles(handles)
+        }
+        const cleanup = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); penCleanupRef.current = null }
+        const up = (upEvent: PointerEvent) => { if (upEvent.pointerId === pointerId) cleanup() }
+        penCleanupRef.current?.()
+        penCleanupRef.current = cleanup
+        window.addEventListener('pointermove', move, { passive: false })
+        window.addEventListener('pointerup', up)
+        window.addEventListener('pointercancel', up)
       }
       return
     }
@@ -2584,14 +2849,14 @@ function Canvas(props: CanvasProps) {
   const compactLayout = viewport.width < 600 || compactLandscape
   const sideWidth = compactLayout ? 0 : viewport.width > 1120 ? 590 : viewport.width > 900 ? 544 : 270
   const canvasWidth = viewport.width - sideWidth
-  const compactVerticalSpace = compactLandscape ? 178 : 292
+  const compactVerticalSpace = (compactLandscape ? 178 : 292) + (props.quickStyleOpen ? 56 : 0)
   const fitWidth = Math.max(120, Math.min(510, (viewport.height - (compactLayout ? compactVerticalSpace : 200)) * aspect, compactLayout ? viewport.width - 42 : canvasWidth - 96))
   const fitHeight = fitWidth / aspect
   const overflow = Math.max(props.documentMeta.width, props.documentMeta.height, ...props.layers.map((layer) => Math.max(Math.abs(layer.x), Math.abs(layer.y)) + Math.hypot(layer.width, layer.height) + Math.abs(layer.strokeWidth))) * 2 + 100
   const outsidePath = `M ${-overflow} ${-overflow} H ${props.documentMeta.width + overflow} V ${props.documentMeta.height + overflow} H ${-overflow} Z M 0 0 H ${props.documentMeta.width} V ${props.documentMeta.height} H 0 Z`
   const visibleLayers = props.layers.filter((layer) => layer.visible)
   const renderLayers = () => visibleLayers.map((layer) => (
-    <LayerElement key={layer.id} layer={layer} editing={props.editingTextId === layer.id}
+    <LayerElement key={layer.id} layer={layer} clipMask={layer.clipToBelow ? `url(#layer-clip-${layer.id})` : undefined} editing={props.editingTextId === layer.id}
       onPointerDown={(event) => onLayerPointerDown(event, layer)} onDoubleClick={(event) => onLayerDoubleClick(event, layer)} />
   ))
   return (
@@ -2653,6 +2918,9 @@ function Canvas(props: CanvasProps) {
             <clipPath id="artboard-inside"><rect width={props.documentMeta.width} height={props.documentMeta.height} /></clipPath>
             <clipPath id="artboard-outside"><path d={outsidePath} clipRule="evenodd" /></clipPath>
             {props.layers.map((layer) => <LayerDefinition key={layer.id} layer={layer} />)}
+            {props.layers.map((layer, index) => layer.clipToBelow && <mask key={layer.id} id={`layer-clip-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={-overflow} y={-overflow} width={props.documentMeta.width + overflow * 2} height={props.documentMeta.height + overflow * 2} style={{ maskType: 'alpha' }}>
+              {index > 0 && props.layers[index - 1].visible && <LayerElement layer={props.layers[index - 1]} clipMask={props.layers[index - 1].clipToBelow ? `url(#layer-clip-${props.layers[index - 1].id})` : undefined} onPointerDown={() => {}} onDoubleClick={() => {}} />}
+            </mask>)}
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
           <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
@@ -2667,9 +2935,10 @@ function Canvas(props: CanvasProps) {
             <polyline points={selectionPoints.map((point) => `${props.selected!.x + point.x * props.selected!.width},${props.selected!.y + point.y * props.selected!.height}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />
             {selectionPoints.map((point, index) => <circle key={index} cx={props.selected!.x + point.x * props.selected!.width} cy={props.selected!.y + point.y * props.selected!.height} r={5 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="white" stroke={ACCENT} vectorEffect="non-scaling-stroke" />)}
           </g>}
-          {draftPoints.length > 0 && props.activeTool === 'brush' && <path className="mask-brush-preview" d={smoothPath(draftPoints, .55)} fill="none" stroke={props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} strokeWidth={props.maskBrushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".58" pointerEvents="none" />}
-          {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><polyline points={draftPoints.map((point) => `${point.x},${point.y}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
-          {props.selected?.visible && props.editingTextId !== props.selected.id && (
+          {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <path className="mask-brush-preview" d={smoothPath(draftPoints, .55)} fill="none" stroke={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} strokeWidth={props.maskBrushSize} strokeLinecap="round" strokeLinejoin="round" opacity=".58" pointerEvents="none" />}
+          {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><path d={bezierPath(draftPoints, draftHandles, false)} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => { const handle = draftHandles[index]; return handle && (handle.x || handle.y) ? <line key={`handle-${index}`} x1={point.x - handle.x} y1={point.y - handle.y} x2={point.x + handle.x} y2={point.y + handle.y} stroke={ACCENT} vectorEffect="non-scaling-stroke" /> : null })}{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
+          {props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+          {props.selectedIds.length === 1 && props.selected?.visible && !props.selected.isEmpty && props.editingTextId !== props.selected.id && (
             <SelectionOverlay
               layer={props.selected}
               mode={props.activeTool}
@@ -2689,13 +2958,14 @@ function Canvas(props: CanvasProps) {
             />
           )}
         </svg>
-        {props.activeTool === 'pen' && <div className="canvas-tool-tip"><PenTool size={14} /> Click to add points · click the first point to close · Enter to finish</div>}
+        {props.activeTool === 'pen' && <div className="canvas-tool-tip"><PenTool size={14} /> {penMode === 'straight' ? 'Tap to add straight points' : 'Drag anchors to create curves'} · click the first point to close · Enter to finish</div>}
         {props.activeTool === 'object-select' && <div className="canvas-tool-tip"><ScanSearch size={14} /> Tap an object to select it for masking</div>}
         {props.activeTool === 'brush' && <div className="canvas-tool-tip"><Brush size={14} /> {props.maskBrushMode === 'hide' ? 'Brush to hide parts of the selected object' : 'Brush to restore hidden parts'}</div>}
         {props.activeTool === 'zoom' && <div className="canvas-tool-tip"><ZoomIn size={14} /> Click to zoom in · Alt-click to zoom out</div>}
       </div>
       </div>
     </div>
+    {props.activeTool === 'pen' && !props.multiSelectMode && <div className={props.compactPenControls ? 'quick-style-wrap pen-actions compact' : 'pen-actions'} role="group" aria-label="Pen controls"><button aria-label="Straight pen" aria-pressed={penMode === 'straight'} onClick={() => setPenMode('straight')}>Straight</button><button aria-label="Curve pen" aria-pressed={penMode === 'curve'} onClick={() => setPenMode('curve')}>Curve</button><button disabled={draftPoints.length < 2} onClick={() => finishPenPath(false)}>Finish path</button><button disabled={!draftPoints.length} onClick={() => setPenDraft([], [])}>Cancel path</button></div>}
     {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className="selection-tool-controls" aria-label="Mask selection controls">
       <span>{props.activeTool === 'polygon-mask' ? 'Tap points around the object' : 'Tap a colour in the image'}</span>
       <label>Action <select aria-label="Selection mask action" value={props.selectionMode} onChange={(event) => props.onSelectionMode(event.target.value as 'keep' | 'hide')}><option value="keep">Keep selection</option><option value="hide">Mask selection out</option></select></label>
@@ -2738,9 +3008,7 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
       {Boolean(layer.maskStrokes?.length || layer.maskSelections?.length) && (
         <mask id={`paint-mask-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3}>
           {(layer.maskSelections || []).reduce<ReactNode>((node, _selection, index) => <g mask={`url(#selection-mask-${layer.id}-${index})`}>{node}</g>, <rect x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3} fill="white" />)}
-          {layer.maskStrokes?.map((stroke, index) => (
-            <path key={index} d={smoothPath(maskStrokePoints(layer, stroke), .55)} fill="none" stroke={stroke.mode === 'hide' ? 'black' : 'white'} strokeWidth={maskStrokeWidth(layer, stroke)} strokeLinecap="round" strokeLinejoin="round" />
-          ))}
+          {layer.maskStrokes?.map((stroke, index) => <MaskStrokeElement key={index} layer={layer} stroke={stroke} />)}
         </mask>
       )}
     </>
@@ -2761,6 +3029,52 @@ function maskStrokePoints(layer: DesignLayer, stroke: MaskBrushStroke) {
 
 function maskStrokeWidth(layer: DesignLayer, stroke: MaskBrushStroke) {
   return stroke.size * Math.max(1, Math.max(layer.width, layer.height))
+}
+
+// Evenly spaced overlapping dabs build coverage with flow, independent of pointer event rate.
+// Their isolated group opacity limits the overall strength of one stroke.
+function maskStrokeDabs(layer: DesignLayer, stroke: MaskBrushStroke) {
+  const points = maskStrokePoints(layer, stroke)
+  if (!points.length) return []
+  const length = points.slice(1).reduce((total, point, index) => total + Math.hypot(point.x - points[index].x, point.y - points[index].y), 0)
+  const spacing = Math.max(.5, maskStrokeWidth(layer, stroke) * .25, length / 4094)
+  const dabs = [points[0]]
+  let remainder = 0
+  for (let index = 1; index < points.length; index++) {
+    const a = points[index - 1], b = points[index]
+    const distance = Math.hypot(b.x - a.x, b.y - a.y)
+    if (!distance) continue
+    let position = spacing - remainder
+    while (position <= distance && dabs.length < 4096) {
+      const t = position / distance
+      dabs.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t })
+      position += spacing
+    }
+    remainder = (remainder + distance) % spacing
+  }
+  return dabs
+}
+
+function MaskStrokeElement({ layer, stroke, paintColor }: { layer: DesignLayer; stroke: MaskBrushStroke; paintColor?: string }) {
+  const color = paintColor || (stroke.mode === 'hide' ? 'black' : 'white')
+  const opacity = clamp(stroke.opacity ?? 1, 0, 1)
+  const flow = clamp(stroke.flow ?? 1, 0, 1)
+  const points = maskStrokePoints(layer, stroke)
+  const width = maskStrokeWidth(layer, stroke)
+  if (!points.length) return null
+  if (flow >= 1 && points.length > 1) return <path d={smoothPath(points, .55)} fill="none" stroke={color} strokeWidth={width} strokeLinecap="round" strokeLinejoin="round" opacity={opacity} />
+  return <g opacity={opacity}>{maskStrokeDabs(layer, stroke).map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={width / 2} fill={color} fillOpacity={flow} />)}</g>
+}
+
+function maskStrokeSvg(layer: DesignLayer, stroke: MaskBrushStroke, paintColor?: string) {
+  const color = paintColor ? escapeXml(paintColor) : stroke.mode === 'hide' ? 'black' : 'white'
+  const opacity = clamp(stroke.opacity ?? 1, 0, 1)
+  const flow = clamp(stroke.flow ?? 1, 0, 1)
+  const points = maskStrokePoints(layer, stroke)
+  const width = maskStrokeWidth(layer, stroke)
+  if (!points.length) return ''
+  if (flow >= 1 && points.length > 1) return `<path d="${smoothPath(points, .55)}" fill="none" stroke="${color}" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`
+  return `<g opacity="${opacity}">${maskStrokeDabs(layer, stroke).map((point) => `<circle cx="${point.x}" cy="${point.y}" r="${width / 2}" fill="${color}" fill-opacity="${flow}"/>`).join('')}</g>`
 }
 
 function layerTransform(layer: DesignLayer) {
@@ -2804,19 +3118,23 @@ function blurSamples(layer: DesignLayer): { transform: string; opacity: number }
   })
 }
 
-function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
+function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }: {
   layer: DesignLayer
   editing?: boolean
+  clipMask?: string
   onPointerDown: (event: ReactPointerEvent<SVGGElement>) => void
   onDoubleClick: (event: ReactMouseEvent<SVGGElement>) => void
 }) {
+  if (layer.isEmpty) return null
   const cx = layer.x + layer.width / 2
   const cy = layer.y + layer.height / 2
   const transform = layerTransform(layer)
   const common = { opacity: editing ? 0 : layer.opacity, 'data-layer': layer.id, pointerEvents: (layer.fillType === 'none' || layer.strokeEnabled === false ? 'all' : undefined) as 'all' | undefined }
   const fill = layerFill(layer)
   let content: ReactNode
-  if (layer.type === 'rectangle') {
+  if (layer.paintStrokes) {
+    content = <g {...common}>{layer.paintStrokes.map((stroke, index) => <MaskStrokeElement key={index} layer={layer} stroke={stroke} paintColor={stroke.color} />)}</g>
+  } else if (layer.type === 'rectangle') {
     content = <rect {...common} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.radius || 0} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'ellipse') {
     content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
@@ -2834,16 +3152,18 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
   } else if (layer.type === 'star') {
     content = <polygon {...common} points={starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
   } else if (layer.type === 'path' || layer.type === 'brush') {
-    const points = layerPoints(layer)
-    content = <path {...common} d={layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))} fill={layer.closed ? fill : 'none'} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
+    content = <path {...common} d={designPath(layer)} fill={layer.closed ? fill : 'none'} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
   } else {
-    const lines = textLines(layer)
+    const lines = textLineDetails(layer)
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
     content = (
       <text {...common} xmlSpace="preserve" x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} fontStyle={layer.fontStyle || 'normal'} textDecoration={layer.underline ? 'underline' : 'none'} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
-        {lines.map((line, index) => <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{line}</tspan>)}
+        {lines.map((line, index) => {
+          const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []
+          return <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{words.length ? words.map((word, wordIndex) => <tspan key={wordIndex} x={x + word.offset}>{word.text}</tspan>) : line.text}</tspan>
+        })}
       </text>
     )
   }
@@ -2853,6 +3173,7 @@ function LayerElement({ layer, editing, onPointerDown, onDoubleClick }: {
     onPointerDown={onPointerDown}
     onDoubleClick={onDoubleClick}
     data-layer={layer.id}
+    mask={clipMask}
     style={{ cursor: layer.locked ? 'not-allowed' : undefined, mixBlendMode: layer.blendMode || 'normal', isolation: 'isolate' }}
   >{layer.blur?.enabled && layer.blur.type === 'gaussian'
     ? <g filter={`url(#blur-${layer.id})`}>{source}</g>
@@ -2938,6 +3259,27 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
 
 function layerPoints(layer: DesignLayer): Point[] {
   return (layer.points || []).map((point) => ({ x: layer.x + point.x * layer.width, y: layer.y + point.y * layer.height }))
+}
+
+function bezierPath(points: Point[], handles: Point[], closed: boolean) {
+  if (!points.length) return ''
+  let result = `M ${points[0].x} ${points[0].y}`
+  const segments = closed ? points.length : points.length - 1
+  for (let index = 0; index < segments; index++) {
+    const next = (index + 1) % points.length
+    const a = points[index], b = points[next]
+    const outgoing = handles[index] || { x: 0, y: 0 }, incoming = handles[next] || { x: 0, y: 0 }
+    if (!outgoing.x && !outgoing.y && !incoming.x && !incoming.y) result += ` L ${b.x} ${b.y}`
+    else result += ` C ${a.x + outgoing.x} ${a.y + outgoing.y} ${b.x - incoming.x} ${b.y - incoming.y} ${b.x} ${b.y}`
+  }
+  return result + (closed ? ' Z' : '')
+}
+
+function designPath(layer: DesignLayer) {
+  const points = layerPoints(layer)
+  if (layer.type === 'brush') return smoothPath(points, layer.smoothing || .5)
+  if (layer.penHandles) return bezierPath(points, layer.penHandles.map((handle) => ({ x: handle.x * layer.width, y: handle.y * layer.height })), Boolean(layer.closed))
+  return pointPath(points, Boolean(layer.closed))
 }
 
 function pointPath(points: Point[], closed: boolean) {
@@ -3199,11 +3541,26 @@ function ZoomControl({ zoom, onZoomOut, onZoomIn, onFit }: { zoom: number; onZoo
   )
 }
 
-function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpenProperties, onOpenMask, onPolygonMask, onWandMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
+function PaintColors({ color, background, onColor, onBackground }: { color: string; background: string; onColor: (value: string) => void; onBackground: (value: string) => void }) {
+  return <div className="paint-colors"><label>Foreground <input type="color" aria-label="Brush foreground colour" value={color} onChange={(event) => onColor(event.target.value)} /></label><label>Background <input type="color" aria-label="Brush background colour" value={background} onChange={(event) => onBackground(event.target.value)} /></label><button aria-label="Swap brush colours" onClick={() => { onColor(background); onBackground(color) }}>Swap</button></div>
+}
+
+function MaskBrushSettings({ opacity, flow, onOpacity, onFlow, prefix = 'Mask brush' }: { opacity: number; flow: number; onOpacity: (value: number) => void; onFlow: (value: number) => void; prefix?: string }) {
+  return <>
+    <label className="mask-strength-control"><span>Opacity</span><input aria-label={`${prefix} opacity`} type="range" min="0" max="100" value={opacity} onChange={(event) => onOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
+    <label className="mask-strength-control"><span>Flow</span><input aria-label={`${prefix} flow`} type="range" min="0" max="100" value={flow} onChange={(event) => onFlow(Number(event.target.value))} /><output>{flow}%</output></label>
+  </>
+}
+
+function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, maskBrushOpacity, maskBrushFlow, onMaskOpacity, onMaskFlow, onOpenProperties, onOpenMask, onPolygonMask, onWandMask, onDuplicate, onDelete, onDoneTool, onUpdate, onMaskMode, onMaskSize, onClearMask }: {
   selected: DesignLayer
   activeTool: Tool
   maskBrushMode: MaskBrushMode
   maskBrushSize: number
+  maskBrushOpacity: number
+  maskBrushFlow: number
+  onMaskOpacity: (value: number) => void
+  onMaskFlow: (value: number) => void
   onOpenProperties: () => void
   onOpenMask: () => void
   onPolygonMask: () => void
@@ -3224,6 +3581,7 @@ function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, onOpen
         <button className={`context-item ${maskBrushMode === 'hide' ? 'active' : ''}`} onClick={() => onMaskMode('hide')}><Brush size={17} /><span>Hide</span></button>
         <button className={`context-item ${maskBrushMode === 'restore' ? 'active' : ''}`} onClick={() => onMaskMode('restore')}><Eraser size={17} /><span>Restore</span></button>
         <label className="mask-size-control"><span>Size</span><input type="range" min="8" max="320" value={maskBrushSize} onChange={(event) => onMaskSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label>
+        <MaskBrushSettings opacity={maskBrushOpacity} flow={maskBrushFlow} onOpacity={onMaskOpacity} onFlow={onMaskFlow} />
         <button className="context-item danger" disabled={!selected.maskStrokes?.length} onClick={onClearMask}><Trash2 size={17} /><span>Clear</span></button>
       </div>
     )
@@ -3453,9 +3811,9 @@ function PropertiesPanel(props: PropertiesPanelProps) {
             <NumberInput label="Size" value={layer.fontSize || 16} unit="px" onChange={(fontSize) => props.onUpdate({ fontSize })} />
           </div>
           <div className="segmented align-control" aria-label="Text alignment">
-            {(['left', 'center', 'right'] as const).map((alignment) => (
-              <button key={alignment} className={(layer.textAlign || 'left') === alignment ? 'selected' : ''} onClick={() => props.onUpdate({ textAlign: alignment })} aria-label={`Align ${alignment}`}>
-                {alignment === 'left' ? <AlignLeft /> : alignment === 'center' ? <AlignCenter /> : <AlignRight />}
+            {(['left', 'center', 'right', 'justify'] as const).map((alignment) => (
+              <button key={alignment} className={(layer.textAlign || 'left') === alignment ? 'selected' : ''} onClick={() => props.onUpdate({ textAlign: alignment, ...(alignment === 'justify' ? { textWrap: true } : {}) })} aria-label={`Align ${alignment}`}>
+                {alignment === 'left' ? <AlignLeft /> : alignment === 'center' ? <AlignCenter /> : alignment === 'right' ? <AlignRight /> : <AlignJustify />}
               </button>
             ))}
           </div>
@@ -3755,23 +4113,68 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
   return <button className={`setting-row ${active ? 'active' : ''}`} onClick={onClick}><span>{icon}{label}</span><span>{value}<ChevronRight size={14} /></span></button>
 }
 
+function QuickPositionInput({ axis, value, onChange }: { axis: 'x' | 'y'; value: number; onChange: (value: number) => void }) {
+  const formatted = String(Math.round(value * 100) / 100)
+  const [draft, setDraft] = useState(formatted)
+  useEffect(() => { setDraft(formatted) }, [formatted])
+  return <label className="quick-style-position">{axis.toUpperCase()}<input aria-label={`${axis.toUpperCase()} position in pixels`} type="number" step="1" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { const next = Number(draft); if (draft.trim() && Number.isFinite(next)) onChange(next); else setDraft(formatted) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>px</span></label>
+}
+
+function QuickStyleToolbar({ layer, onUpdate, onClose, onMore }: {
+  layer: DesignLayer
+  onUpdate: (patch: Partial<DesignLayer>) => void
+  onClose: () => void
+  onMore: () => void
+}) {
+  const changeText = (patch: Partial<DesignLayer>) => {
+    const next = { ...layer, ...patch }
+    const height = next.textWrap ? Math.max(next.height, textLines(next).length * (next.fontSize || 32) * (next.lineHeight || 1.2)) : next.height
+    onUpdate({ ...patch, height })
+  }
+  const keepFocus = (event: React.PointerEvent<HTMLButtonElement>) => event.preventDefault()
+  return <div className="quick-style-wrap">
+    <div className="quick-style" role="toolbar" aria-label={layer.type === 'text' ? 'Text quick style' : 'Object quick style'}>
+      {layer.type === 'text' && <>
+        {(['left', 'center', 'right', 'justify'] as const).map((alignment) => <button key={alignment} aria-label={`Align text ${alignment}`} title={`Align text ${alignment}`} aria-pressed={(layer.textAlign || 'left') === alignment} onPointerDown={keepFocus} onClick={() => changeText({ textAlign: alignment, ...(alignment === 'justify' ? { textWrap: true } : {}) })}>
+          {alignment === 'left' ? <AlignLeft /> : alignment === 'center' ? <AlignCenter /> : alignment === 'right' ? <AlignRight /> : <AlignJustify />}
+        </button>)}
+        <span className="quick-style-divider" />
+        <button aria-label="Decrease font size" onPointerDown={keepFocus} onClick={() => changeText({ fontSize: Math.max(1, (layer.fontSize || 32) - 1) })}><Minus /></button>
+        <span className="quick-style-size" aria-label={`Font size ${layer.fontSize || 32} pixels`}>{layer.fontSize || 32}</span>
+        <button aria-label="Increase font size" onPointerDown={keepFocus} onClick={() => changeText({ fontSize: Math.min(1000, (layer.fontSize || 32) + 1) })}><Plus /></button>
+        <span className="quick-style-divider" />
+        <button aria-label="Bold" aria-pressed={(layer.fontWeight || 400) >= 700} onPointerDown={keepFocus} onClick={() => changeText({ fontWeight: (layer.fontWeight || 400) >= 700 ? 400 : 700 })}><Bold /></button>
+        <button aria-label="Italic" aria-pressed={layer.fontStyle === 'italic'} onPointerDown={keepFocus} onClick={() => changeText({ fontStyle: layer.fontStyle === 'italic' ? 'normal' : 'italic' })}><Italic /></button>
+        <button aria-label="Underline" aria-pressed={Boolean(layer.underline)} onPointerDown={keepFocus} onClick={() => changeText({ underline: !layer.underline })}><Underline /></button>
+        <span className="quick-style-divider" />
+      </>}
+      {(['x', 'y'] as const).map((axis) => <QuickPositionInput key={axis} axis={axis} value={layer[axis]} onChange={(value) => onUpdate({ [axis]: value })} />)}
+      <button className="quick-style-more" onPointerDown={keepFocus} onClick={onMore}>More</button>
+      <button aria-label="Close quick style" onPointerDown={keepFocus} onClick={onClose}><X /></button>
+    </div>
+  </div>
+}
+
 type MobileToolAction =
-  | 'select' | 'object-select' | 'mask-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
-  | 'properties' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
+  | 'select' | 'object-select' | 'mask-brush' | 'paint-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
+  | 'properties' | 'fill' | 'clip' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
   | 'polygon-mask' | 'wand-mask'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
-function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAction }: {
+function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMode, onAction }: {
   activeTool: Tool
   selected: DesignLayer | null
   editingText: boolean
+  canClip: boolean
   maskBrushMode: MaskBrushMode
   onAction: (action: MobileToolAction) => void
 }) {
   type Item = { label: string; icon: ReactNode; action: MobileToolAction; active?: boolean; danger?: boolean; disabled?: boolean }
   let items: Item[]
 
-  if (activeTool === 'brush' && selected) {
+  if (activeTool === 'paint-brush') {
+    items = [ { label: 'Done', icon: <Check />, action: 'mask-done', active: true }, { label: 'Smaller', icon: <Minus />, action: 'mask-smaller' }, { label: 'Larger', icon: <Plus />, action: 'mask-larger' } ]
+  } else if (activeTool === 'brush' && selected) {
     items = [
       { label: 'Done', icon: <Check />, action: 'mask-done', active: true },
       { label: 'Hide', icon: <Brush />, action: 'mask-hide', active: maskBrushMode === 'hide' },
@@ -3780,6 +4183,13 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
       { label: 'Larger', icon: <Plus />, action: 'mask-larger' },
       { label: 'Clear', icon: <Trash2 />, action: 'mask-clear', danger: true, disabled: !selected.maskStrokes?.length },
       { label: 'Object', icon: <ScanSearch />, action: 'object-select' },
+    ]
+  } else if (selected?.isEmpty) {
+    items = [
+      { label: 'Shapes', icon: <Shapes />, action: 'shapes' },
+      { label: 'Text', icon: <Type />, action: 'text' },
+      { label: 'Brush', icon: <Brush />, action: 'paint-brush' },
+      { label: 'Delete', icon: <Trash2 />, action: 'delete', danger: true },
     ]
   } else if (selected) {
     const supportsCorners = selected.type === 'rectangle' || (selected.type === 'polygon' && ((selected.shapeKind || 'regular') === 'regular' || selected.shapeKind === 'diamond' || selected.shapeKind === 'starburst'))
@@ -3811,7 +4221,7 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
       items = [
         ...(activeTool === 'corner' ? [{ label: 'Done', icon: <Check />, action: 'mask-done' as MobileToolAction, active: true }] : []),
         { label: 'Edit', icon: <SlidersHorizontal />, action: 'properties' },
-        { label: 'Fill', icon: <Palette />, action: 'properties' },
+        { label: 'Fill', icon: <Palette />, action: 'fill' },
         ...(supportsCorners ? [{ label: 'Corners', icon: <Spline />, action: 'corners' as MobileToolAction, active: activeTool === 'corner' }] : []),
         { label: 'Align', icon: <AlignCenter />, action: 'align' },
         { label: 'Arrange', icon: <Layers3 />, action: 'arrange' },
@@ -3824,7 +4234,8 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
     items = [
       { label: 'Select', icon: <MousePointer2 />, action: 'select', active: activeTool === 'select' },
       { label: 'Object', icon: <ScanSearch />, action: 'object-select', active: activeTool === 'object-select' },
-      { label: 'Mask', icon: <Brush />, action: 'mask-brush', active: activeTool === 'brush' },
+      { label: 'Brush', icon: <Brush />, action: 'paint-brush' },
+      { label: 'Mask', icon: <Eraser />, action: 'mask-brush', active: activeTool === 'brush' },
       { label: 'Shapes', icon: <Shapes />, action: 'shapes', active: ['rectangle', 'ellipse', 'polygon', 'star', 'line'].includes(activeTool) },
       { label: 'Text', icon: <Type />, action: 'text', active: activeTool === 'text' },
       { label: 'Image', icon: <ImageIcon />, action: 'image', active: activeTool === 'image' },
@@ -3833,9 +4244,13 @@ function MobileToolbar({ activeTool, selected, editingText, maskBrushMode, onAct
     ]
   }
 
+  if (selected && !selected.isEmpty && activeTool !== 'brush' && activeTool !== 'paint-brush') items.push({ label: 'Brush', icon: <Brush />, action: 'paint-brush' })
+  if (selected && activeTool !== 'brush' && activeTool !== 'paint-brush') items.push({ label: selected.clipToBelow ? 'Unclip' : 'Clip', icon: <Layers3 />, action: 'clip', disabled: !canClip })
+  if (selected) items.push({ label: 'Layers', icon: <Layers3 />, action: 'layers' })
+
   return (
     <nav className={`mobile-toolbar ${selected ? 'selection-toolbar' : ''}`} aria-label={selected ? `${selected.name} actions` : 'Design tools'}>
-      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onPointerDown={item.action === 'finish-text' ? (event) => event.preventDefault() : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
+      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onPointerDown={editingText && (item.action === 'finish-text' || item.action === 'properties' || item.action === 'align') ? (event) => event.preventDefault() : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
     </nav>
   )
 }
@@ -4030,7 +4445,8 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'object-select', label: 'Object selection', icon: <ScanSearch /> },
     { id: 'polygon-mask', label: 'Polygonal selection', icon: <LassoSelect /> },
     { id: 'wand-mask', label: 'Magic wand', icon: <WandSparkles /> },
-    { id: 'brush', label: 'Mask brush', icon: <Brush /> },
+    { id: 'paint-brush', label: 'Brush', icon: <Brush /> },
+    { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
@@ -4283,13 +4699,19 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     }
     if (layer.maskStrokes?.length || layer.maskSelections?.length) {
       const maskExtent = Math.max(layer.width, layer.height, 1)
-      const strokes = (layer.maskStrokes || []).map((stroke) => `<path d="${smoothPath(maskStrokePoints(layer, stroke), .55)}" fill="none" stroke="${stroke.mode === 'hide' ? 'black' : 'white'}" stroke-width="${maskStrokeWidth(layer, stroke)}" stroke-linecap="round" stroke-linejoin="round"/>`).join('')
+      const strokes = (layer.maskStrokes || []).map((stroke) => maskStrokeSvg(layer, stroke)).join('')
       const base = (layer.maskSelections || []).reduce((node, _selection, index) => `<g mask="url(#selection-mask-${layer.id}-${index})">${node}</g>`, `<rect x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}" fill="white"/>`)
       definition += `<mask id="paint-mask-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${layer.x - layer.width}" y="${layer.y - maskExtent}" width="${layer.width * 3}" height="${maskExtent * 3}">${base}${strokes}</mask>`
     }
+    const index = layers.indexOf(layer)
+    if (layer.clipToBelow) {
+      const below = layers[index - 1]
+      const extent = Math.max(meta.width, meta.height, ...layers.map((item) => Math.max(Math.abs(item.x), Math.abs(item.y)) + Math.hypot(item.width, item.height) + Math.abs(item.strokeWidth))) * 2 + 100
+      definition += `<mask id="layer-clip-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${-extent}" y="${-extent}" width="${meta.width + extent * 2}" height="${meta.height + extent * 2}" style="mask-type:alpha">${below?.visible ? `<use href="#export-layer-${below.id}"/>` : ''}</mask>`
+    }
     return definition
   }).join('')
-  const body = layers.filter((layer) => layer.visible).map((layer) => {
+  const body = layers.filter((layer) => layer.visible && !layer.isEmpty).map((layer) => {
     const cx = layer.x + layer.width / 2
     const cy = layer.y + layer.height / 2
     const transform = layerTransform(layer)
@@ -4300,8 +4722,9 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
       const samples = blurSamples(layer)
       const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
-      return `<g style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
+      return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
     }
+    if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke) => maskStrokeSvg(layer, stroke, stroke.color)).join('')}</g>`)
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
@@ -4316,14 +4739,13 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}"/>`)
     if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
     if (layer.type === 'path' || layer.type === 'brush') {
-      const points = layerPoints(layer)
-      const data = layer.type === 'brush' ? smoothPath(points, layer.smoothing || .5) : pointPath(points, Boolean(layer.closed))
+      const data = designPath(layer)
       return wrap(`<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
     }
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLines(layer).map((line, index) => `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${escapeXml(line)}</tspan>`).join('')}</text>`)
+    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLineDetails(layer).map((line, index) => { const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []; return `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${words.length ? words.map((word) => `<tspan x="${x + word.offset}">${escapeXml(word.text)}</tspan>`).join('') : escapeXml(line.text)}</tspan>` }).join('')}</text>`)
   }).join('')
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
 }

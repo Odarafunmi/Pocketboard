@@ -4779,3 +4779,74 @@ button:disabled {
 .text-format-controls button, .stroke-type-control button { flex: 1; min-height: 40px; }
 .no-fill-note { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .no-fill-swatch { background: linear-gradient(135deg, transparent 44%, var(--danger) 46%, var(--danger) 54%, transparent 56%), repeating-conic-gradient(#ddd 0 25%, #fff 0 50%) 50% / 8px 8px; }
+
+/* Reserve a compact strip above the canvas rather than covering artwork. */
+.quick-style-wrap { display: none; }
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
+  .workspace.has-quick-style .canvas-scroll { top: 104px; padding-top: 12px; }
+  .quick-style-wrap {
+    display: block; position: absolute; z-index: 13; top: 48px; left: 10px; right: 10px;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--surface);
+    box-shadow: 0 3px 12px rgba(0, 0, 0, .12); overflow: hidden;
+  }
+  .quick-style {
+    display: flex; align-items: center; gap: 2px; overflow-x: auto; overscroll-behavior-x: contain;
+    touch-action: pan-x; scrollbar-width: thin; padding: 3px; min-height: 50px;
+  }
+  .quick-style button { flex: 0 0 44px; height: 44px; border: 0; border-radius: 6px; background: transparent; color: var(--text-primary); display: grid; place-items: center; }
+  .quick-style button svg { width: 18px; height: 18px; }
+  .quick-style button[aria-pressed="true"] { background: var(--accent-subtle); color: var(--accent); }
+  .quick-style .quick-style-more { flex-basis: auto; padding: 0 12px; font-size: 12px; font-weight: 600; }
+  .quick-style-divider { flex: 0 0 1px; height: 24px; background: var(--border); margin: 0 3px; }
+  .quick-style-size { flex: 0 0 auto; min-width: 25px; text-align: center; font-size: 12px; }
+  .quick-style-position { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; padding: 0 5px; font-size: 12px; }
+  .quick-style-position input { width: 56px; height: 34px; padding: 3px 4px; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; font: inherit; }
+  .quick-style-position span { color: var(--text-secondary); }
+}
+
+.mask-thumbnail {
+  flex: 0 0 28px; width: 28px; height: 28px; margin-right: 6px; padding: 2px;
+  border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface-raised);
+}
+.mask-thumbnail svg { display: block; width: 100%; height: 100%; border: 1px solid var(--border); }
+.mask-thumbnail:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mask-thumbnail.active { border: 2px solid var(--accent); padding: 1px; }
+.layer-clip-action { flex: 0 0 auto; min-height: 36px; margin: 4px 8px; padding: 0 8px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); font: inherit; font-size: 12px; text-align: left; }
+.layer-clip-action:disabled { color: var(--text-disabled); }
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) { .mask-thumbnail { flex-basis: 36px; width: 36px; height: 36px; } .layer-clip-action { min-height: 44px; } }
+
+.mask-strength-control { flex: 0 0 auto; min-height: 44px; display: flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+.mask-strength-control input { width: 90px; accent-color: var(--accent); touch-action: none; }
+.mask-strength-control output { width: 34px; color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; }
+@media (min-width: 600px) { .mask-brush-bar { max-width: calc(100% - 20px); overflow-x: auto; } }
+.layers-assets { overflow: auto; flex: 1 1 auto; min-height: 0; padding: 0 8px; }
+.paint-colors { display: flex; align-items: center; flex: 0 0 auto; gap: 6px; padding: 0 8px; }
+.paint-colors label { display: flex; align-items: center; gap: 4px; font-size: 11px; white-space: nowrap; }
+.paint-colors input { width: 34px; height: 34px; padding: 1px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }
+.paint-colors button, .paint-brush-settings button { min-height: 40px; padding: 0 8px; border: 0; border-radius: 6px; color: var(--text-primary); background: var(--surface-input); }
+.paint-brush-settings { position: absolute; z-index: 13; left: 14px; right: 14px; top: 50px; display: flex; align-items: center; overflow-x: auto; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-1); }
+.layer-multi-select { flex: 0 0 auto; min-height: 36px; margin: 4px 8px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); text-align: left; }
+.layer-multi-select[aria-pressed="true"] { color: var(--accent); background: var(--accent-subtle); }
+.layer-row-menu { position: fixed; z-index: 101; min-width: 160px; padding: 4px; display: grid; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-2); }
+.layer-row-menu button { min-height: 34px; padding: 0 10px; border: 0; background: transparent; color: var(--text-primary); text-align: left; }
+.layer-row-menu button:focus-visible, .layer-row-menu button:hover { background: var(--surface-input); }
+.multi-mode-banner { position: absolute; z-index: 25; top: 104px; left: 10px; display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-1); font-size: 12px; }
+.multi-mode-banner button { min-height: 38px; border: 0; border-radius: 6px; color: var(--accent); background: var(--accent-subtle); }
+.multi-mode-compact .quick-style { gap: 8px; padding: 3px 8px; font-size: 12px; }
+.multi-mode-compact .quick-style button { flex-basis: auto; padding: 0 12px; color: var(--accent); background: var(--accent-subtle); }
+.pen-actions { position: absolute; z-index: 13; top: 50px; left: 14px; display: flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow-1); }
+.pen-actions button { min-height: 38px; padding: 0 12px; border: 0; border-radius: 6px; background: var(--surface-input); color: var(--text-primary); }
+.pen-actions button:disabled { color: var(--text-disabled); }
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) { .pen-actions.compact { display: flex; top: 48px; left: 10px; right: 10px; } .pen-actions button { min-height: 42px; } }
+
+.layer-selection-controls { flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin: 4px 8px; font-size: 11px; color: var(--text-secondary); }
+.layer-selection-controls span { flex: 1 1 auto; }
+.layer-selection-controls button { min-height: 36px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); }
+.layer-selection-controls button[aria-pressed="true"] { color: var(--accent); background: var(--accent-subtle); }
+.layer-selection-controls button:disabled { color: var(--text-disabled); }
+.pen-actions button { flex: 0 0 auto; white-space: nowrap; }
+.pen-actions button[aria-pressed="true"] { color: var(--accent); background: var(--accent-subtle); }
+@media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
+  .layer-selection-controls button { min-height: 44px; }
+  .pen-actions.compact { overflow-x: auto; touch-action: pan-x; overscroll-behavior-x: contain; }
+}

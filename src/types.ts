@@ -11,6 +11,7 @@ export type Tool =
   | 'line'
   | 'pen'
   | 'brush'
+  | 'paint-brush'
   | 'corner'
   | 'zoom'
   | 'crop'
@@ -48,6 +49,9 @@ export interface MaskBrushStroke {
   points: Point[]
   size: number
   mode: MaskBrushMode
+  /** Per-stroke opacity and per-dab flow, from 0 to 1. Missing values are 1 for older projects. */
+  opacity?: number
+  flow?: number
 }
 
 export type BlurType = 'gaussian' | 'motion' | 'radial' | 'path'
@@ -81,6 +85,9 @@ export interface DesignLayer {
   shapeKind?: ShapeKind
   burstInset?: number
   points?: Point[]
+  isEmpty?: boolean
+  paintStrokes?: (MaskBrushStroke & { color: string })[]
+  penHandles?: Point[]
   closed?: boolean
   smoothing?: number
   text?: string
@@ -95,12 +102,14 @@ export interface DesignLayer {
   fontAssets?: FontAsset[]
   letterSpacing?: number
   lineHeight?: number
-  textAlign?: 'left' | 'center' | 'right'
+  textAlign?: 'left' | 'center' | 'right' | 'justify'
   src?: string
   mask?: MaskType
   imageOffsetX?: number
   imageOffsetY?: number
   imageScale?: number
+  maskCreated?: boolean
+  clipToBelow?: boolean
   maskStrokes?: MaskBrushStroke[]
   maskSelections?: MaskSelection[]
   flipX?: boolean
