@@ -73,3 +73,31 @@ Text properties include undoable uppercase and lowercase conversion. Use **Find 
 Text layers have bold, italic and underline controls in Typography, applied to the whole layer. Shape and text fills can be set to None in Fill, while shape and path strokes can be set to None in Stroke. The previous colours are retained when these options are turned off, and the artwork remains selectable. These choices are saved with the project and included in local exports.
 
 New circles, regular polygons and radial stars start with equal axes. Selecting one of these unlocked shapes restores equal axes around its centre, using the longer side; undo restores the previous dimensions. Other shapes retain their own width-to-height proportions, and selecting text, images, lines or drawn paths does not resize them. Corner handles preserve proportions; side handles still resize independently.
+
+### Carousel designs
+
+Enter multiplication in a new design or artboard width or height, such as `1080 * 3`; press Enter or leave the field to calculate it. For three Instagram portrait slides, use a 3240 × 1350 canvas.
+
+In the canvas design settings, **Carousel divisions** adds equal vertical or horizontal divisions. On mobile, open **More → Carousel divisions**. The **Knife tool** adds non-destructive cuts wherever you tap; use its direction buttons to choose vertical or horizontal cuts. With the canvas focused, arrow keys position the knife and Enter adds a cut. Cuts can be dragged like guides and are saved locally for the current artboard. They do not change the artwork.
+
+In **Export**, choose PNG or JPG and turn on **Export carousel slides**. Divide into equal parts, or choose **Knife and division guides** to use the cuts on the current artboard. Set the output width and height for each slide; each region is resized to those exact dimensions, so choose matching proportions to avoid stretching. The ordered images are downloaded together as a ZIP file. Carousel export uses the active artboard; regular exports and editable project backups are unchanged. Guides and cuts are local workspace settings and are not included in project backups.
+
+### Help and guides
+
+Open **Help** on the home screen or the question-mark button in the editor. On a phone, **More → Help and guides** also opens it (tap an empty area first if More is not visible). Search for a tool or expand a topic for its location and instructions, including the knife-to-carousel-export workflow.
+
+### Opening Photoshop files
+
+Choose **Open PSD** on the home screen, **File → Open PSD** on desktop, or **More → Open PSD** on a phone. Select a `.psd` file and confirm. Opening a PSD replaces the current on-device design; export a Project backup first if needed.
+
+The PSD is decoded locally using its saved composite and opened at its original pixel dimensions as one flattened image layer. The original file is not changed. Photoshop layers, groups, editable text, masks, smart objects and effects cannot be edited separately, and this is not a PSD round-trip editor. Save the source in Photoshop with **Maximize Compatibility** enabled if its composite is missing. PSB files, certain colour modes and malformed files are not supported; CMYK colours may differ. Files are limited to 100 MB and 40 million pixels (maximum 16,384 pixels per side). Large flattened images may exceed browser storage limits, so export a backup if the app reports that it could not save.
+
+### Opening Illustrator files
+
+Choose **Open AI** on the home screen, **File → Open Illustrator file** on desktop, or **More → Open Illustrator file** on a phone. AI files must be saved in Illustrator with **Create PDF Compatible File** enabled. The first PDF page is rendered locally at 96 pixels per inch as one flattened image layer; paths, layers, text and other Illustrator features are not editable. Other pages/artboards are not imported. Colour, fonts and effects can differ from Illustrator. The file and canvas size limits match PSD import. Opening replaces the current design, so export a Project backup first.
+
+EPS and non-PDF-compatible AI files are not supported. Convert them to SVG or PNG in a compatible application before importing; Pocketboard places SVG as an image, not editable vector paths.
+
+### Numeric controls
+
+Type signed values in numeric fields where meaningful, then press Enter or leave the field to apply them. Use the increase and decrease buttons or keyboard arrow keys for precise changes. Hold an adjustment button with a mouse or touch to repeat until release. Fields with a fixed valid range, including opacity, dimensions, brush strength and slide counts, are limited to that range.

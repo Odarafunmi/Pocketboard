@@ -32,6 +32,7 @@ import {
   GripVertical,
   Hand,
   Heart,
+  HelpCircle,
   Hexagon,
   Image as ImageIcon,
   Italic,
@@ -55,6 +56,7 @@ import {
   RotateCw,
   Ruler,
   ScanSearch,
+  Scissors,
   Save,
   Search,
   Settings2,
@@ -100,6 +102,7 @@ import { extractImagePalette } from './imagePalette'
 import { magicWandMask } from './selectionMask'
 import { downloadOnlineFont, ensureFont, ensureLayerFonts, fontFromBlob, getLocalFonts, listSavedFonts, saveFont, searchOnlineFonts, type LocalFont, type OnlineFont } from './fonts'
 import { presetShapePath, shapeCategories } from './shapePresets'
+import { NumericControl } from './NumericControl'
 import type {
   ArtboardSnapshot,
   BlurType,
@@ -250,6 +253,7 @@ function App() {
   const [gridVisible, setGridVisible] = useState(() => localStorage.getItem('pocketboard-grid') === 'true')
   const [gridSize, setGridSize] = useState(() => Number(localStorage.getItem('pocketboard-grid-size')) || 80)
   const [guidesVisible, setGuidesVisible] = useState(() => localStorage.getItem('pocketboard-guides-visible') === 'true')
+  const [knifeAxis, setKnifeAxis] = useState<'x' | 'y'>('x')
   const [canvasGuides, setCanvasGuides] = useState<CanvasGuide[]>(() => {
     try { return JSON.parse(localStorage.getItem('pocketboard-guides') || '[]') }
     catch { return [] }
@@ -259,13 +263,16 @@ function App() {
   const [zoom, setZoom] = useState(68)
   const [mobileSheet, setMobileSheet] = useState<MobileSheet>(null)
   const [quickStyleId, setQuickStyleId] = useState<string | null>(null)
-  useEffect(() => { setQuickStyleId(null) }, [selectedId, activeArtboardId])
+  const [quickStyleAction, setQuickStyleAction] = useState<MobileToolAction | null>(null)
+  useEffect(() => { setQuickStyleId(null); setQuickStyleAction(null) }, [selectedId, activeArtboardId])
   const [mouseSettings, setMouseSettings] = useState<MouseSettings>(readMouseSettings)
   const changeMouseSettings = (settings: MouseSettings) => {
     setMouseSettings(settings)
     try { localStorage.setItem('pocketboard-mouse-settings', JSON.stringify(settings)) } catch { /* Settings remain active for this session. */ }
   }
+  const [psdOpen, setPsdOpen] = useState<false | 'psd' | 'ai'>(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
   const [savingState, setSavingState] = useState<'Saving' | 'Saved' | 'Not saved'>('Saved')
   const [imagePalette, setImagePalette] = useState<{ name: string; colors: string[] } | null>(() => {
     try {
@@ -783,6 +790,18 @@ function App() {
     }])
   }
 
+  const addSlice = (axis: 'x' | 'y', position: number) => {
+    const size = axis === 'x' ? documentMeta.width : documentMeta.height
+    if (position <= 0 || position >= size) return
+    setGuidesVisible(true)
+    setCanvasGuides((guides) => guides.some((guide) => guide.slice && guide.artboardId === activeArtboardId && guide.axis === axis && Math.abs(guide.position - position) < 0.5) ? guides : [...guides, { id: makeId(), axis, position, slice: true, artboardId: activeArtboardId }])
+  }
+  const equalSlices = (axis: 'x' | 'y', count: number) => {
+    const size = axis === 'x' ? documentMeta.width : documentMeta.height
+    setGuidesVisible(true)
+    setCanvasGuides((guides) => [...guides.filter((guide) => !guide.slice || guide.artboardId !== activeArtboardId || guide.axis !== axis), ...Array.from({ length: count - 1 }, (_, index) => ({ id: makeId(), axis, position: size * (index + 1) / count, slice: true, artboardId: activeArtboardId }))])
+  }
+
   const addLayer = useCallback((type: LayerType, point?: { x: number; y: number }, preset?: Partial<DesignLayer>) => {
     const count = layersRef.current.length
     const centerX = point?.x ?? documentMeta.width / 2
@@ -939,6 +958,7 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (helpOpen || psdOpen) return
       const target = event.target as HTMLElement
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable
       const command = event.metaKey || event.ctrlKey
@@ -994,7 +1014,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, finishTextEditing, redo, selectedId, undo, updateSelection])
+  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, finishTextEditing, helpOpen, psdOpen, redo, selectedId, undo, updateSelection])
 
   const createDesign = (meta: DesignDocument, name: string) => {
     const toPx = (value: number) => {
@@ -1071,6 +1091,20 @@ function App() {
     reader.readAsText(file)
   }
 
+  const openPsd = (fileName: string, width: number, height: number, src: string) => {
+    finishTextEditing()
+    const id = makeId()
+    const name = fileName.replace(/\.(psd|ai)$/i, '') || 'Imported design'
+    const meta: DesignDocument = { width, height, unit: 'px', dpi: 72, background: '#FFFFFF', presetName: /\.ai$/i.test(fileName) ? 'Imported Illustrator' : 'Imported PSD' }
+    const image: DesignLayer = { id: makeId(), name: `${name} (flattened)`, type: 'image', x: 0, y: 0, width, height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'transparent', stroke: 'transparent', strokeWidth: 0, src, mask: 'none', imageScale: 1 }
+    layersRef.current = [image]
+    setDocumentMeta(meta); setProjectName(name); setLayers([image])
+    setArtboards([{ id, name: 'Artboard 1', document: meta, layers: [image] }]); setActiveArtboardId(id)
+    setPast([]); setFuture([]); setSelectedId(null); setMultiIds([]); setMultiSelectMode(false); setActiveTool('select'); setZoom(68)
+    setCanvasGuides([]); setGuidesVisible(false); setPsdOpen(false)
+    navigate('editor'); showToast('Opened as a flattened image')
+  }
+
   if (view === 'home') {
     return (
       <>
@@ -1078,12 +1112,17 @@ function App() {
           theme={theme}
           onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
           onNew={() => navigate('new')}
+          onHelp={() => setHelpOpen(true)}
+          onOpenPsd={() => setPsdOpen('psd')}
+          onOpenAi={() => setPsdOpen('ai')}
           onImport={importProject}
           onOpenSample={openSample}
           onOpenCurrent={() => navigate('editor')}
           currentName={projectName}
           hasCurrent={layers.length > 0 && projectName !== 'Objects & Space'}
         />
+        {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+        {psdOpen && <PsdImportDialog kind={psdOpen} onClose={() => setPsdOpen(false)} onImport={openPsd} />}
         {toast && <Toast message={toast} onClose={() => setToast(null)} />}
       </>
     )
@@ -1091,20 +1130,22 @@ function App() {
 
   if (view === 'new') {
     return (
-      <NewDesignScreen
+      <> <NewDesignScreen
+        onHelp={() => setHelpOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
         onBack={() => navigate('home')}
         onCreate={createDesign}
-      />
+      />{helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}</>
     )
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
-  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
+  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
   const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
   const showSelectionOptions = isCompact && !multiSelectMode && (activeTool === 'polygon-mask' || activeTool === 'wand-mask')
   const showMultiOptions = isCompact && multiSelectMode
+  const showKnifeOptions = isCompact && activeTool === 'knife'
   const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
     if (action === 'select' || action === 'mask-done') {
@@ -1122,7 +1163,13 @@ function App() {
     else if (action === 'extract-palette') { setMobileSheet('properties'); void extractSelectedPalette() }
     else if (action === 'layers') setMobileSheet('layers')
     else if (action === 'more') setMobileSheet('more')
-    else if ((action === 'properties' || action === 'fill' || action === 'shape-mask' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) { setMobileSheet(null); if (activeTool === 'polygon-mask' || activeTool === 'wand-mask') setActiveTool('select'); setQuickStyleId((id) => action === 'properties' && id === selected.id && activeTool !== 'polygon-mask' && activeTool !== 'wand-mask' ? null : selected.id) }
+    else if ((action === 'properties' || action === 'fill' || action === 'shape-mask' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) {
+      const close = Boolean(showQuickStyle && quickStyleAction === action)
+      setMobileSheet(null)
+      if (activeTool === 'polygon-mask' || activeTool === 'wand-mask') setActiveTool('select')
+      setQuickStyleId(close ? null : selected.id)
+      setQuickStyleAction(close ? null : action)
+    }
     else if (action === 'properties' || action === 'fill' || action === 'align' || action === 'arrange') setMobileSheet('properties')
     else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
     else if (action === 'finish-text') finishTextEditing()
@@ -1165,6 +1212,7 @@ function App() {
         onHome={() => navigate('home')}
         onNew={() => navigate('new')}
         onExport={() => setExportOpen(true)}
+        onHelp={() => setHelpOpen(true)}
         theme={theme}
         onToggleTheme={() => setTheme(theme === 'light' ? 'dark' : 'light')}
         onShare={shareDesign}
@@ -1174,6 +1222,8 @@ function App() {
         onNew={() => navigate('new')}
         onSave={saveNow}
         onImport={() => imageInputRef.current?.click()}
+        onOpenPsd={() => setPsdOpen('psd')}
+        onOpenAi={() => setPsdOpen('ai')}
         onExport={() => setExportOpen(true)}
         onUndo={undo} onRedo={redo} canUndo={past.length > 0} canRedo={future.length > 0}
         onDuplicate={duplicateSelected} onDelete={deleteSelected} hasSelection={Boolean(selected)}
@@ -1200,6 +1250,7 @@ function App() {
             else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
             else {
               finishTextEditing()
+              if (tool === 'knife') setMultiSelectMode(false)
               setActiveTool(tool)
             }
           }}
@@ -1240,7 +1291,7 @@ function App() {
           />
         </aside>
 
-        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''} ${showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions ? 'has-quick-style' : ''}`} aria-label="Design canvas"
+        <main className={`workspace tool-${activeTool} ${guidesVisible ? 'with-rulers' : ''} ${showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions || showKnifeOptions ? 'has-quick-style' : ''}`} aria-label="Design canvas"
           onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDraggingFiles(true) } }}
           onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFiles(false) }}
           onDrop={(event) => {
@@ -1270,7 +1321,7 @@ function App() {
           {showQuickStyle && <QuickStyleToolbar
             layer={selected}
             onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
-            onClose={() => setQuickStyleId(null)}
+            onClose={() => { setQuickStyleId(null); setQuickStyleAction(null) }}
             onMore={() => { finishTextEditing(); setMobileSheet('properties') }}
             onMaskMore={() => setMobileSheet('mask')}
             onAction={handleMobileToolAction}
@@ -1278,14 +1329,15 @@ function App() {
           {showBrushOptions && <div className="quick-style-wrap"><div className="quick-style brush-quick-settings" role="group" aria-label={activeTool === 'paint-brush' ? 'Brush settings' : 'Mask brush settings'}>
             {activeTool === 'brush' && <><button className="quick-style-text" aria-pressed={maskBrushMode === 'hide'} onClick={() => setMaskBrushMode('hide')}>Hide</button><button className="quick-style-text" aria-pressed={maskBrushMode === 'restore'} onClick={() => setMaskBrushMode('restore')}>Restore</button></>}
             {activeTool === 'paint-brush' && <PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} />}
-            <label className="mask-strength-control"><span>Size</span><input type="range" aria-label={activeTool === 'paint-brush' ? 'Brush size' : 'Mask brush size'} min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}px</output></label>
+            <label className="mask-strength-control"><span>Size</span><input type="range" aria-label={activeTool === 'paint-brush' ? 'Brush size' : 'Mask brush size'} min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><NumericControl label={activeTool === 'paint-brush' ? 'Brush size value' : 'Mask brush size value'} min={8} max={320} value={maskBrushSize} onChange={setMaskBrushSize} /></label>
             <MaskBrushSettings prefix={activeTool === 'paint-brush' ? 'Brush' : 'Mask brush'} opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} />
           </div></div>}
-          {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
+          {!isCompact && activeTool === 'paint-brush' && <div className="paint-brush-settings" role="group" aria-label="Brush settings"><PaintColors color={paintColor} background={paintBackground} onColor={setPaintColor} onBackground={setPaintBackground} /><label className="mask-strength-control">Size <input type="range" aria-label="Brush size" min="8" max="320" value={maskBrushSize} onChange={(event) => setMaskBrushSize(Number(event.target.value))} /><NumericControl label="Brush size value" min={8} max={320} value={maskBrushSize} onChange={setMaskBrushSize} /></label><MaskBrushSettings prefix="Brush" opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={setMaskBrushOpacity} onFlow={setMaskBrushFlow} onHardness={setBrushHardness} /><button onClick={() => setActiveTool('select')}>Done</button></div>}
           <Canvas
             artboardRef={artboardRef}
-            quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions)}
+            quickStyleOpen={Boolean(showQuickStyle || showBrushOptions || showMultiOptions || showPenOptions || showSelectionOptions || showKnifeOptions)}
             compactSelectionControls={showSelectionOptions}
+            knifeAxis={knifeAxis} onKnifeAxis={setKnifeAxis} onSlice={(position) => addSlice(knifeAxis, position)} onKnifeDone={() => setActiveTool('select')}
             documentMeta={documentMeta}
             layers={layers}
             selected={selected}
@@ -1301,7 +1353,7 @@ function App() {
             gridVisible={gridVisible}
             gridSize={gridSize}
             guidesVisible={guidesVisible}
-            userGuides={canvasGuides}
+            userGuides={canvasGuides.filter((guide) => !guide.slice || guide.artboardId === activeArtboardId)}
             editingTextId={editingTextId}
             maskBrushMode={maskBrushMode}
             maskBrushSize={maskBrushSize}
@@ -1398,12 +1450,13 @@ function App() {
             gridVisible={gridVisible}
             gridSize={gridSize}
             guidesVisible={guidesVisible}
-            guides={canvasGuides}
+            guides={canvasGuides.filter((guide) => !guide.slice || guide.artboardId === activeArtboardId)}
             onToggleGrid={() => setGridVisible((visible) => !visible)}
             onGridSize={(size) => setGridSize(clamp(size, 4, 500))}
             onToggleGuides={toggleGuides}
             onAddGuide={addGuide}
-            onClearGuides={() => setCanvasGuides([])}
+            onClearGuides={() => setCanvasGuides((guides) => guides.filter((guide) => guide.slice && guide.artboardId !== activeArtboardId))}
+            onEqualSlices={equalSlices} onKnife={(axis) => { setKnifeAxis(axis); setActiveTool('knife'); setMobileSheet(null); setSelectedId(null) }}
           />
         </aside>
       </div>
@@ -1414,6 +1467,7 @@ function App() {
         editingText={Boolean(editingTextId)}
         canClip={Boolean(selected && !selected.locked && (selected.clipToBelow || layers.findIndex((layer) => layer.id === selected.id) > 0))}
         maskBrushMode={maskBrushMode}
+        quickStyleAction={showQuickStyle && !mobileSheet ? quickStyleAction : null}
         onAction={handleMobileToolAction}
       />
 
@@ -1475,12 +1529,13 @@ function App() {
               gridVisible={gridVisible}
               gridSize={gridSize}
               guidesVisible={guidesVisible}
-              guides={canvasGuides}
+              guides={canvasGuides.filter((guide) => !guide.slice || guide.artboardId === activeArtboardId)}
               onToggleGrid={() => setGridVisible((visible) => !visible)}
               onGridSize={(size) => setGridSize(clamp(size, 4, 500))}
               onToggleGuides={toggleGuides}
               onAddGuide={addGuide}
-              onClearGuides={() => setCanvasGuides([])}
+              onClearGuides={() => setCanvasGuides((guides) => guides.filter((guide) => guide.slice && guide.artboardId !== activeArtboardId))}
+              onEqualSlices={equalSlices} onKnife={(axis) => { setKnifeAxis(axis); setActiveTool('knife'); setMobileSheet(null); setSelectedId(null) }}
               insideSheet
             />
           )}
@@ -1518,11 +1573,14 @@ function App() {
                 else if (action === 'rulers') toggleGuides()
                 else if (action === 'artboards') { openArtboardManager(); return }
                 else if (action === 'mouse') { setMobileSheet('mouse'); return }
+                else if (action === 'open-psd' || action === 'open-ai') { setMobileSheet(null); setPsdOpen(action === 'open-ai' ? 'ai' : 'psd'); return }
+                else if (action === 'help') { setMobileSheet(null); setHelpOpen(true); return }
+                else if (action === 'carousel-settings') { setSelectedId(null); setMobileSheet('properties'); return }
                 else if (action === 'settings') { setMobileSheet('properties'); return }
                 else if (action === 'brush') { activateMaskBrush(); return }
                 else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null); return }
                 else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
-                else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner') setActiveTool(action)
+                else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner' || action === 'knife') { if (action === 'knife') setMultiSelectMode(false); setActiveTool(action) }
                 setMobileSheet(null)
               }}
             />
@@ -1536,11 +1594,14 @@ function App() {
           documentMeta={documentMeta}
           layers={layers}
           artboards={exportArtboards}
+          guides={canvasGuides.filter((guide) => !guide.slice || guide.artboardId === activeArtboardId)}
           onClose={() => setExportOpen(false)}
           onSuccess={(message) => { setExportOpen(false); showToast(message) }}
         />
       )}
 
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {psdOpen && <PsdImportDialog kind={psdOpen} onClose={() => setPsdOpen(false)} onImport={openPsd} />}
       <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={handleImageUpload} />
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
@@ -1561,6 +1622,7 @@ interface TopBarProps {
   onHome: () => void
   onNew: () => void
   onExport: () => void
+  onHelp: () => void
   theme: Theme
   onToggleTheme: () => void
   onShare: () => void
@@ -1609,6 +1671,7 @@ function TopBar(props: TopBarProps) {
         <IconButton className="theme-button" label={props.theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={props.onToggleTheme}>
           {props.theme === 'light' ? <Moon /> : <Sun />}
         </IconButton>
+        <IconButton className="help-button" label="Help" onClick={props.onHelp}><HelpCircle /></IconButton>
         <button className="button secondary share-button" onClick={props.onShare}><Share2 size={17} /><span>Share</span></button>
         <button className="button primary export-button" onClick={props.onExport}><Download size={17} /><span>Export</span></button>
       </div>
@@ -1617,7 +1680,7 @@ function TopBar(props: TopBarProps) {
 }
 
 type EditorMenuProps = {
-  onNew: () => void; onSave: () => void; onImport: () => void; onExport: () => void
+  onNew: () => void; onSave: () => void; onImport: () => void; onOpenPsd: () => void; onOpenAi: () => void; onExport: () => void
   onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean
   onDuplicate: () => void; onDelete: () => void; hasSelection: boolean
   onDeselect: () => void; onSelectTool: () => void; onObjectSelect: () => void
@@ -1642,6 +1705,8 @@ function EditorMenu(props: EditorMenuProps) {
       { label: 'New design', action: props.onNew },
       { label: 'Save', action: props.onSave },
       { label: 'Import from device', action: props.onImport },
+      { label: 'Open PSD', action: props.onOpenPsd },
+      { label: 'Open Illustrator file', action: props.onOpenAi },
       { label: 'Export', action: props.onExport },
     ] },
     { name: 'Edit', items: [
@@ -1727,6 +1792,7 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'polygon', label: 'Polygon', shortcut: 'U', icon: <Hexagon /> },
     { id: 'star', label: 'Star', icon: <Star /> },
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
+    { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'paint-brush', label: 'Brush', shortcut: 'B', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
@@ -2071,6 +2137,10 @@ interface CanvasProps {
   onToggleMulti: (id: string) => void
   compactPenControls: boolean
   compactSelectionControls: boolean
+  knifeAxis: 'x' | 'y'
+  onKnifeAxis: (axis: 'x' | 'y') => void
+  onSlice: (position: number) => void
+  onKnifeDone: () => void
   onMoveSelectionLive: (snapshot: DesignLayer[], ids: string[], dx: number, dy: number) => void
   onRestoreSelection: (snapshot: DesignLayer[]) => void
   activeTool: Tool
@@ -2477,7 +2547,7 @@ function Canvas(props: CanvasProps) {
     const selectionGesture = selectionGestureRef.current
     if (selectionGesture?.pointerId === event.pointerId) {
       selectionGestureRef.current = null
-      if (event.type === 'pointerup' && !pinchRef.current && Math.hypot(event.clientX - selectionGesture.x, event.clientY - selectionGesture.y) < 10) selectAt(pointerToCanvas(event.clientX, event.clientY))
+      if (event.type === 'pointerup' && !pinchRef.current && Math.hypot(event.clientX - selectionGesture.x, event.clientY - selectionGesture.y) < 10) { const point = pointerToCanvas(event.clientX, event.clientY); if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? point.x : point.y); else selectAt(point) }
     }
     const gesture = pickGestureRef.current
     if (gesture?.pointerId === event.pointerId) {
@@ -2566,8 +2636,8 @@ function Canvas(props: CanvasProps) {
         }
 
         if (original.type === 'text' && !isCorner && (handle === 'e' || handle === 'w')) {
-          const lineHeight = (original.fontSize || 32) * (original.lineHeight || 1.2)
-          height = Math.max(lineHeight, textLines({ ...original, width, textWrap: true }).length * lineHeight)
+          const lineHeight = (original.fontSize || 32) * (original.lineHeight ?? 1.2)
+          height = Math.max(original.fontSize || 32, textLines({ ...original, width, textWrap: true }).length * lineHeight)
         }
 
         const shiftX = handle.includes('e')
@@ -2966,14 +3036,14 @@ function Canvas(props: CanvasProps) {
           ref={props.artboardRef}
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
-          role={props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'application' : 'img'}
-          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 0 : undefined}
-          aria-label={['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          role={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool) ? 'application' : 'img'}
+          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool) ? 0 : undefined}
+          aria-label={props.activeTool === 'knife' ? 'Knife tool. Use arrow keys to position a cut and Enter to add it.' : ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
           onKeyDown={(event) => {
             const selectionActive = props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask'
-            if (!props.pickingColor && !selectionActive) return
+            if (!props.pickingColor && !selectionActive && props.activeTool !== 'knife') return
             const step = event.shiftKey ? 10 : 1
-            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else props.onPickColor(pickCursor); return }
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? pickCursor.x : pickCursor.y); else props.onPickColor(pickCursor); return }
             if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
             event.preventDefault()
             event.stopPropagation()
@@ -2983,7 +3053,7 @@ function Canvas(props: CanvasProps) {
             }))
           }}
           onPointerDownCapture={(event) => {
-            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') {
+            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask' || props.activeTool === 'knife') {
               if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
               event.preventDefault(); event.stopPropagation()
               selectionGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
@@ -3012,7 +3082,7 @@ function Canvas(props: CanvasProps) {
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
           <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
-          {(props.pickingColor || ['polygon-mask', 'wand-mask'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {(props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
             ? <line key={guide.id} className="user-guide guide-x" x1={guide.position} x2={guide.position} y1="0" y2={props.documentMeta.height} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />
@@ -3055,12 +3125,13 @@ function Canvas(props: CanvasProps) {
       </div>
       </div>
     </div>
+    {props.activeTool === 'knife' && <div className="knife-controls" role="toolbar" aria-label="Knife controls"><span>Tap canvas to add a cut</span><button aria-pressed={props.knifeAxis === 'x'} onClick={() => props.onKnifeAxis('x')}>Vertical</button><button aria-pressed={props.knifeAxis === 'y'} onClick={() => props.onKnifeAxis('y')}>Horizontal</button><button onClick={props.onKnifeDone}>Done</button></div>}
     {props.activeTool === 'pen' && !props.multiSelectMode && <div className={props.compactPenControls ? 'quick-style-wrap pen-actions compact' : 'pen-actions'} role="group" aria-label="Pen controls"><button aria-label="Straight pen" aria-pressed={penMode === 'straight'} onClick={() => setPenMode('straight')}>Straight</button><button aria-label="Curve pen" aria-pressed={penMode === 'curve'} onClick={() => setPenMode('curve')}>Curve</button><button disabled={draftPoints.length < 2} onClick={() => finishPenPath(false)}>Finish path</button><button disabled={!draftPoints.length} onClick={() => setPenDraft([], [])}>Cancel path</button></div>}
     {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className={`selection-tool-controls ${props.compactSelectionControls ? 'compact-selection-controls' : ''}`} role="toolbar" aria-label="Mask selection controls">
       <span>{props.activeTool === 'polygon-mask' ? 'Tap points around the object' : 'Tap a colour in the image'}</span>
       <label>Action <select aria-label="Selection mask action" value={props.selectionMode} onChange={(event) => props.onSelectionMode(event.target.value as 'keep' | 'hide')}><option value="keep">Keep selection</option><option value="hide">Mask selection out</option></select></label>
-      {props.activeTool === 'wand-mask' && <label>Tolerance <input aria-label="Magic wand tolerance" type="number" min="0" max="255" value={props.selectionTolerance} onChange={(event) => props.onSelectionTolerance(clamp(Number(event.target.value), 0, 255))} /></label>}
-      <label>Feather <input aria-label="Selection feather" type="number" min="0" max="20" value={props.selectionFeather} onChange={(event) => props.onSelectionFeather(clamp(Number(event.target.value), 0, 20))} /></label>
+      {props.activeTool === 'wand-mask' && <div className="numeric-labeled">Tolerance <NumericControl label="Magic wand tolerance" min={0} max={255} value={props.selectionTolerance} onChange={props.onSelectionTolerance} /></div>}
+      <div className="numeric-labeled">Feather <NumericControl label="Selection feather" min={0} max={20} value={props.selectionFeather} onChange={props.onSelectionFeather} /></div>
       {props.activeTool === 'polygon-mask' && <button className="button primary" disabled={selectionPoints.length < 3} onClick={applyPolygonSelection}>Apply selection</button>}
       <button className="button secondary" onClick={props.onFinishSelection}>{selectionBusy ? 'Cancel processing' : 'Cancel'}</button>
       {selectionBusy && <span role="status">Selecting…</span>}
@@ -3259,7 +3330,7 @@ function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }
       <text {...common} xmlSpace="preserve" x={x} y={layer.y + fontSize * 0.84} transform={`translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)`} fill={fill} fontFamily={layer.fontFamily || 'Inter'} fontSize={fontSize} fontWeight={layer.fontWeight || 400} fontStyle={layer.fontStyle || 'normal'} textDecoration={layer.underline ? 'underline' : 'none'} letterSpacing={layer.letterSpacing || 0} textAnchor={anchor}>
         {lines.map((line, index) => {
           const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []
-          return <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}>{words.length ? words.map((word, wordIndex) => <tspan key={wordIndex} x={x + word.offset}>{word.text}</tspan>) : line.text}</tspan>
+          return <tspan key={index} x={x} dy={index === 0 ? 0 : fontSize * (layer.lineHeight ?? 1.2)}>{words.length ? words.map((word, wordIndex) => <tspan key={wordIndex} x={x + word.offset}>{word.text}</tspan>) : line.text}</tspan>
         })}
       </text>
     )
@@ -3298,7 +3369,7 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
   const updateValue = (text: string) => {
     setValue(text)
     const lines = textLines({ ...layer, text }).length
-    const height = Math.max(layer.height, lines * fontSize * (layer.lineHeight || 1.2))
+    const height = Math.max(layer.height, lines * fontSize * (layer.lineHeight ?? 1.2))
     onUpdate({ text, height })
   }
   return (
@@ -3321,7 +3392,7 @@ function TextEditorOverlay({ layer, onUpdate, onFinish }: {
             fontStyle: layer.fontStyle || 'normal',
             textDecoration: layer.underline ? 'underline' : 'none',
             letterSpacing: `${layer.letterSpacing || 0}px`,
-            lineHeight: layer.lineHeight || 1.2,
+            lineHeight: Math.max(0, layer.lineHeight ?? 1.2),
             textAlign: layer.textAlign || 'left',
             width: `${100 / (layer.textScaleX || 1)}%`,
             transform: `scaleX(${layer.textScaleX || 1})`,
@@ -3652,9 +3723,9 @@ function PaintColors({ color, background, onColor, onBackground }: { color: stri
 function MaskBrushSettings({ opacity, flow, hardness, onOpacity, onFlow, onHardness, prefix = 'Mask brush' }: { opacity: number; flow: number; hardness: number; onOpacity: (value: number) => void; onFlow: (value: number) => void; onHardness: (value: number) => void; prefix?: string }) {
   return <>
     <div className="brush-hardness-presets" role="group" aria-label={`${prefix} edge`}><button type="button" aria-pressed={hardness === 0} onClick={() => onHardness(0)}>Soft</button><button type="button" aria-pressed={hardness === 100} onClick={() => onHardness(100)}>Hard</button></div>
-    <label className="mask-strength-control"><span>Hardness</span><input aria-label={`${prefix} hardness`} type="range" min="0" max="100" value={hardness} onChange={(event) => onHardness(Number(event.target.value))} /><output>{hardness}%</output></label>
-    <label className="mask-strength-control"><span>Opacity</span><input aria-label={`${prefix} opacity`} type="range" min="0" max="100" value={opacity} onChange={(event) => onOpacity(Number(event.target.value))} /><output>{opacity}%</output></label>
-    <label className="mask-strength-control"><span>Flow</span><input aria-label={`${prefix} flow`} type="range" min="0" max="100" value={flow} onChange={(event) => onFlow(Number(event.target.value))} /><output>{flow}%</output></label>
+    <label className="mask-strength-control"><span>Hardness</span><input aria-label={`${prefix} hardness`} type="range" min="0" max="100" value={hardness} onChange={(event) => onHardness(Number(event.target.value))} /><NumericControl label={`${prefix} hardness value`} value={hardness} min={0} max={100} onChange={onHardness} /></label>
+    <label className="mask-strength-control"><span>Opacity</span><input aria-label={`${prefix} opacity`} type="range" min="0" max="100" value={opacity} onChange={(event) => onOpacity(Number(event.target.value))} /><NumericControl label={`${prefix} opacity value`} value={opacity} min={0} max={100} onChange={onOpacity} /></label>
+    <label className="mask-strength-control"><span>Flow</span><input aria-label={`${prefix} flow`} type="range" min="0" max="100" value={flow} onChange={(event) => onFlow(Number(event.target.value))} /><NumericControl label={`${prefix} flow value`} value={flow} min={0} max={100} onChange={onFlow} /></label>
   </>
 }
 
@@ -3688,7 +3759,7 @@ function ContextBar({ selected, activeTool, maskBrushMode, maskBrushSize, maskBr
         <button className="context-item context-done" onClick={onDoneTool}><Check size={17} /><span>Done</span></button>
         <button className={`context-item ${maskBrushMode === 'hide' ? 'active' : ''}`} onClick={() => onMaskMode('hide')}><Brush size={17} /><span>Hide</span></button>
         <button className={`context-item ${maskBrushMode === 'restore' ? 'active' : ''}`} onClick={() => onMaskMode('restore')}><Eraser size={17} /><span>Restore</span></button>
-        <label className="mask-size-control"><span>Size</span><input type="range" min="8" max="320" value={maskBrushSize} onChange={(event) => onMaskSize(Number(event.target.value))} /><output>{maskBrushSize}</output></label>
+        <label className="mask-size-control"><span>Size</span><input type="range" min="8" max="320" value={maskBrushSize} onChange={(event) => onMaskSize(Number(event.target.value))} /><NumericControl label="Mask brush size value" value={maskBrushSize} min={8} max={320} onChange={onMaskSize} /></label>
         <MaskBrushSettings opacity={maskBrushOpacity} flow={maskBrushFlow} hardness={brushHardness} onOpacity={onMaskOpacity} onFlow={onMaskFlow} onHardness={onBrushHardness} />
         <button className="context-item danger" disabled={!selected.maskStrokes?.length} onClick={onClearMask}><Trash2 size={17} /><span>Clear</span></button>
       </div>
@@ -3743,27 +3814,32 @@ interface PropertiesPanelProps {
   onToggleGuides: () => void
   onAddGuide: (axis: 'x' | 'y') => void
   onClearGuides: () => void
+  onEqualSlices: (axis: 'x' | 'y', count: number) => void
+  onKnife: (axis: 'x' | 'y') => void
   insideSheet?: boolean
 }
 
 function PropertiesPanel(props: PropertiesPanelProps) {
   const [linked, setLinked] = useState(false)
+  const [sliceCount, setSliceCount] = useState(3)
+  const [sliceAxis, setSliceAxis] = useState<'x' | 'y'>('x')
   if (!props.selected) {
     return (
       <div className={`panel-inner properties-inner ${props.insideSheet ? 'inside-sheet' : ''}`}>
         {!props.insideSheet && <div className="panel-header properties-title"><div><h2>Design</h2></div></div>}
         <PropertySection title="Artboard">
           <div className="dimension-pair">
-            <NumberInput label="W" value={props.documentMeta.width} unit="px" onChange={(value) => props.onUpdateDocument({ width: value })} />
-            <NumberInput label="H" value={props.documentMeta.height} unit="px" onChange={(value) => props.onUpdateDocument({ height: value })} />
+            <label className="number-field"><span>W</span><DimensionInput label="Artboard width" value={props.documentMeta.width} onChange={(width) => props.onUpdateDocument({ width })} /><small>px</small></label>
+            <label className="number-field"><span>H</span><DimensionInput label="Artboard height" value={props.documentMeta.height} onChange={(height) => props.onUpdateDocument({ height })} /><small>px</small></label>
           </div>
           <ColorInput onPickColor={props.onPickColor} label="Background" value={props.documentMeta.background} onChange={(value) => props.onUpdateDocument({ background: value })} />
         </PropertySection>
         <PropertySection title="Canvas">
           <SettingRow icon={<Grid3X3 size={17} />} label="Layout grid" value={props.gridVisible ? 'On' : 'Off'} active={props.gridVisible} onClick={props.onToggleGrid} />
-          {props.gridVisible && <NumberInput label="Grid" value={props.gridSize} unit="px" onChange={props.onGridSize} />}
+          {props.gridVisible && <NumberInput label="Grid" min={4} max={500} value={props.gridSize} unit="px" onChange={props.onGridSize} />}
           <SettingRow icon={<Ruler size={17} />} label="Rulers and guides" value={props.guidesVisible ? 'On' : 'Off'} active={props.guidesVisible} onClick={props.onToggleGuides} />
           {props.guidesVisible && <div className="guide-buttons"><button className="button secondary" onClick={() => props.onAddGuide('x')}>Vertical guide</button><button className="button secondary" onClick={() => props.onAddGuide('y')}>Horizontal guide</button></div>}
+          <div className="carousel-guide-controls"><strong>Carousel divisions</strong><label>Direction <select value={sliceAxis} onChange={(event) => setSliceAxis(event.target.value as 'x' | 'y')}><option value="x">Across</option><option value="y">Down</option></select></label><div className="numeric-labeled">Parts <NumericControl label="Carousel parts" min={2} max={50} integer value={sliceCount} onChange={(value) => setSliceCount(Math.round(value))} /></div><button className="button secondary" onClick={() => props.onEqualSlices(sliceAxis, sliceCount)}>Add equal divisions</button><button className="button secondary" onClick={() => props.onKnife(sliceAxis)}>Knife tool</button><small>Divisions are non-destructive and can be used for carousel export.</small></div>
           {props.guides.length > 0 && <button className="clear-guides" onClick={props.onClearGuides}>Clear {props.guides.length} guide{props.guides.length === 1 ? '' : 's'}</button>}
         </PropertySection>
         <PropertySection title="Document colours">
@@ -3851,7 +3927,7 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         {layer.blur && <>
           <button className="button secondary full-button" aria-pressed={layer.blur.enabled} onClick={() => props.onUpdate({ blur: { ...layer.blur!, enabled: !layer.blur!.enabled } })}>{layer.blur.enabled ? 'Disable blur' : 'Enable blur'}</button>
           <SliderField label="Blur amount" value={layer.blur.amount} min={0} max={100} unit={layer.blur.type === 'radial' ? '%' : 'px'} onChange={(amount) => props.onUpdate({ blur: { ...layer.blur!, amount: clamp(amount, 0, 100) } })} />
-          {(layer.blur.type === 'motion' || layer.blur.type === 'path') && <SliderField label="Blur angle" value={layer.blur.angle} min={0} max={360} unit="°" onChange={(angle) => props.onUpdate({ blur: { ...layer.blur!, angle: clamp(angle, 0, 360) } })} />}
+          {(layer.blur.type === 'motion' || layer.blur.type === 'path') && <SliderField label="Blur angle" value={layer.blur.angle} min={-360} max={360} unit="°" onChange={(angle) => props.onUpdate({ blur: { ...layer.blur!, angle: clamp(angle, -360, 360) } })} />}
           {layer.blur.type === 'path' && <SliderField label="Path curvature" value={layer.blur.curvature} min={-100} max={100} unit="%" onChange={(curvature) => props.onUpdate({ blur: { ...layer.blur!, curvature: clamp(curvature, -100, 100) } })} />}
           {layer.blur.type !== 'gaussian' && <small className="palette-note">Blur uses sampled exposure for local rendering.</small>}
         </>}
@@ -3863,12 +3939,12 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           <NumberInput label="Y" value={round(layer.y)} onChange={(value) => props.onUpdate({ y: value })} />
         </div>
         <div className="dimension-pair">
-          <NumberInput label="W" value={round(layer.width)} onChange={(value) => {
+          <NumberInput label="W" min={1} value={round(layer.width)} onChange={(value) => {
             const patch: Partial<DesignLayer> = { width: value }
             if (linked && layer.width) patch.height = layer.height * value / layer.width
             props.onUpdate(patch)
           }} />
-          <NumberInput label="H" value={round(layer.height)} onChange={(value) => {
+          <NumberInput label="H" min={1} value={round(layer.height)} onChange={(value) => {
             const patch: Partial<DesignLayer> = { height: value }
             if (linked && layer.height) patch.width = layer.width * value / layer.height
             props.onUpdate(patch)
@@ -3896,12 +3972,12 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           <div className="segmented text-format-controls" role="group" aria-label="Text formatting">
             <button type="button" className={(layer.fontWeight || 400) >= 700 ? 'selected' : ''} aria-label="Bold" aria-pressed={(layer.fontWeight || 400) >= 700} onClick={() => {
               const fontWeight = (layer.fontWeight || 400) >= 700 ? 400 : 700
-              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontWeight }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontWeight }).length * (layer.fontSize || 32) * (layer.lineHeight ?? 1.2)) : layer.height
               props.onUpdate({ fontWeight, height })
             }}><Bold /></button>
             <button type="button" className={layer.fontStyle === 'italic' ? 'selected' : ''} aria-label="Italic" aria-pressed={layer.fontStyle === 'italic'} onClick={() => {
               const fontStyle = layer.fontStyle === 'italic' ? 'normal' : 'italic'
-              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontStyle }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, fontStyle }).length * (layer.fontSize || 32) * (layer.lineHeight ?? 1.2)) : layer.height
               props.onUpdate({ fontStyle, height })
             }}><Italic /></button>
             <button type="button" className={layer.underline ? 'selected' : ''} aria-label="Underline" aria-pressed={Boolean(layer.underline)} onClick={() => props.onUpdate({ underline: !layer.underline })}><Underline /></button>
@@ -3910,13 +3986,13 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           <div className="case-controls" aria-label="Change text case">
             {(['uppercase', 'lowercase'] as const).map((mode) => <button key={mode} type="button" className="button secondary" onClick={() => {
               const text = mode === 'uppercase' ? (layer.text || '').toUpperCase() : (layer.text || '').toLowerCase()
-              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, text }).length * (layer.fontSize || 32) * (layer.lineHeight || 1.2)) : layer.height
+              const height = layer.textWrap ? Math.max(layer.height, textLines({ ...layer, text }).length * (layer.fontSize || 32) * (layer.lineHeight ?? 1.2)) : layer.height
               props.onUpdate({ text, height })
             }}>{mode === 'uppercase' ? 'UPPERCASE' : 'lowercase'}</button>)}
           </div>
           <div className="dimension-pair">
             <SelectField compact label="Weight" value={String(layer.fontWeight || 400)} options={['400', '500', '600', '700']} onChange={(value) => props.onUpdate({ fontWeight: Number(value) })} />
-            <NumberInput label="Size" value={layer.fontSize || 16} unit="px" onChange={(fontSize) => props.onUpdate({ fontSize })} />
+            <NumberInput label="Size" min={1} value={layer.fontSize || 16} unit="px" onChange={(fontSize) => props.onUpdate({ fontSize })} />
           </div>
           <div className="segmented align-control" aria-label="Text alignment">
             {(['left', 'center', 'right', 'justify'] as const).map((alignment) => (
@@ -3926,9 +4002,10 @@ function PropertiesPanel(props: PropertiesPanelProps) {
             ))}
           </div>
           <div className="dimension-pair">
-            <NumberInput label="Line" value={Number((layer.lineHeight || 1.2).toFixed(2))} unit="×" step={0.1} onChange={(lineHeight) => props.onUpdate({ lineHeight })} />
-            <NumberInput label="Track" value={layer.letterSpacing || 0} unit="px" step={0.1} onChange={(letterSpacing) => props.onUpdate({ letterSpacing })} />
+            <SignedNumberInput key={`${layer.id}-line`} label="Line" accessibleLabel="Line height" value={layer.lineHeight ?? 1.2} unit="×" onChange={(lineHeight) => props.onUpdate({ lineHeight })} />
+            <SignedNumberInput key={`${layer.id}-track`} label="Track" accessibleLabel="Letter spacing" value={layer.letterSpacing ?? 0} unit="px" onChange={(letterSpacing) => props.onUpdate({ letterSpacing })} />
           </div>
+          {(layer.lineHeight ?? 1.2) < 0 && <small className="spacing-note">Negative line height is displayed on the canvas after text editing.</small>}
         </PropertySection>
       )}
 
@@ -3963,8 +4040,8 @@ function PropertiesPanel(props: PropertiesPanelProps) {
           {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} /></>}
           {layer.type === 'brush'
             ? <><SliderField label="Brush size" value={layer.strokeWidth} min={1} max={120} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} /><SliderField label="Smoothing" value={round((layer.smoothing || .5) * 100)} min={0} max={100} unit="%" onChange={(value) => props.onUpdate({ smoothing: value / 100 })} /></>
-            : <NumberInput label="Width" value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} />}
-          {layer.type === 'rectangle' && <><NumberInput label="Corners" value={layer.radius || 0} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
+            : <NumberInput label="Width" min={0} value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} />}
+          {layer.type === 'rectangle' && <><NumberInput label="Corners" min={0} value={layer.radius || 0} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
         </PropertySection>
       )}
 
@@ -4076,14 +4153,17 @@ function PropertySection({ title, actions, children, optional }: { title: string
   )
 }
 
-function NumberInput({ label, value, unit, step = 1, onChange }: { label: ReactNode; value: number; unit?: string; step?: number; onChange: (value: number) => void }) {
-  return (
-    <label className="number-field">
-      <span>{label}</span>
-      <input type="number" value={Number.isFinite(value) ? Number(value.toFixed(2)) : 0} step={step} onChange={(event) => onChange(Number(event.target.value))} />
-      {unit && <small>{unit}</small>}
-    </label>
-  )
+function DimensionInput({ value, onChange, label }: { value: number; onChange: (value: number) => void; label: string }) {
+  return <NumericControl label={label} value={value} min={0.01} max={100000} expression onChange={onChange} />
+}
+
+function SignedNumberInput({ label, accessibleLabel, value, unit, onChange }: { label: string; accessibleLabel: string; value: number; unit: string; onChange: (value: number) => void }) {
+  return <div className="number-field"><span>{label}</span><NumericControl label={accessibleLabel} value={value} step={0.1} onChange={onChange} /><small>{unit}</small></div>
+}
+
+function NumberInput({ label, value, unit, step = 1, min, max, onChange }: { label: ReactNode; value: number; unit?: string; step?: number; min?: number; max?: number; onChange: (value: number) => void }) {
+  const name = typeof label === 'string' ? label : 'Rotation'
+  return <div className="number-field"><span>{label}</span><NumericControl label={name} value={value} min={min} max={max} step={step} onChange={onChange} />{unit && <small>{unit}</small>}</div>
 }
 
 function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: DesignLayer; onUpdate: (patch: Partial<DesignLayer>) => void; onPickColor: (apply: (color: string) => void) => void; imagePalette: { name: string; colors: string[] } | null }) {
@@ -4106,7 +4186,7 @@ function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: Des
         : <>
           <div className="gradient-preview" style={{ background: gradient.type === 'radial' ? `radial-gradient(circle, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` : `linear-gradient(${gradient.angle}deg, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` }} />
           <div className="gradient-stops">{gradient.stops.map((stop, index) => <div key={index}><ColorInput onPickColor={onPickColor} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} />{imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={stop.color} onChange={(color) => setStop(index, color)} /></>}</div>)}</div>
-          {gradient.type === 'linear' && <SliderField label="Angle" value={gradient.angle} min={0} max={360} unit="°" onChange={(angle) => onUpdate({ gradient: { ...gradient, angle } })} />}
+          {gradient.type === 'linear' && <SliderField label="Angle" value={gradient.angle} min={-360} max={360} unit="°" onChange={(angle) => onUpdate({ gradient: { ...gradient, angle } })} />}
         </>}
       {imagePalette && (fillType === 'solid' || fillType === 'none') && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={fillType === 'none' ? '' : layer.fill} onChange={(color) => onUpdate({ fill: color, fillType: 'solid' })} /></>}
       <div className="palette-heading"><span>Document colours</span></div>
@@ -4187,9 +4267,9 @@ function ColorInput({ label, value, onChange, onPickColor }: { label: string; va
         <div className="colour-wheel-shade" style={{ opacity: 1 - hsv.v }} />
         <span className="colour-wheel-marker" style={{ left: `${50 + Math.cos(angle) * hsv.s * 50}%`, top: `${50 + Math.sin(angle) * hsv.s * 50}%` }} />
       </div>
-      <label>Hue <input type="range" min="0" max="359" value={Math.round(hsv.h)} aria-label={`${label} hue`} onChange={(event) => updateHsv(Number(event.target.value), hsv.s, hsv.v)} /></label>
-      <label>Saturation <input type="range" min="0" max="100" value={Math.round(hsv.s * 100)} aria-label={`${label} saturation`} onChange={(event) => updateHsv(hsv.h, Number(event.target.value) / 100, hsv.v)} /></label>
-      <label>Brightness <input type="range" min="0" max="100" value={Math.round(hsv.v * 100)} aria-label={`${label} brightness`} onChange={(event) => updateHsv(hsv.h, hsv.s, Number(event.target.value) / 100)} /></label>
+      <label>Hue <input type="range" min="0" max="359" value={Math.round(hsv.h)} aria-label={`${label} hue`} onChange={(event) => updateHsv(Number(event.target.value), hsv.s, hsv.v)} /><NumericControl label={`${label} hue value`} value={Math.round(hsv.h)} min={0} max={359} onChange={(value) => updateHsv(value, hsv.s, hsv.v)} /></label>
+      <label>Saturation <input type="range" min="0" max="100" value={Math.round(hsv.s * 100)} aria-label={`${label} saturation`} onChange={(event) => updateHsv(hsv.h, Number(event.target.value) / 100, hsv.v)} /><NumericControl label={`${label} saturation value`} value={Math.round(hsv.s * 100)} min={0} max={100} onChange={(value) => updateHsv(hsv.h, value / 100, hsv.v)} /></label>
+      <label>Brightness <input type="range" min="0" max="100" value={Math.round(hsv.v * 100)} aria-label={`${label} brightness`} onChange={(event) => updateHsv(hsv.h, hsv.s, Number(event.target.value) / 100)} /><NumericControl label={`${label} brightness value`} value={Math.round(hsv.v * 100)} min={0} max={100} onChange={(value) => updateHsv(hsv.h, hsv.s, value / 100)} /></label>
     </div>}
   </div>
 }
@@ -4211,7 +4291,7 @@ function SelectField({ label, value, options, onChange, compact }: { label: stri
 function SliderField({ label, value, min, max, unit, onChange }: { label: string; value: number; min: number; max: number; unit: string; onChange: (value: number) => void }) {
   return (
     <div className="slider-field">
-      <div><span>{label}</span><label><input type="number" aria-label={`${label} value`} min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /><small>{unit}</small></label></div>
+      <div><span>{label}</span><div className="slider-value"><NumericControl label={`${label} value`} min={min} max={max} value={value} onChange={onChange} /><small>{unit}</small></div></div>
       <input type="range" aria-label={label} min={min} max={max} value={value} style={{ '--range-progress': `${(value - min) / (max - min) * 100}%` } as CSSProperties} onChange={(event) => onChange(Number(event.target.value))} />
     </div>
   )
@@ -4222,16 +4302,11 @@ function SettingRow({ icon, label, value, active, onClick }: { icon: ReactNode; 
 }
 
 function QuickPositionInput({ axis, value, onChange }: { axis: 'x' | 'y'; value: number; onChange: (value: number) => void }) {
-  const formatted = String(Math.round(value * 100) / 100)
-  const [draft, setDraft] = useState(formatted)
-  useEffect(() => { setDraft(formatted) }, [formatted])
-  return <label className="quick-style-position">{axis.toUpperCase()}<input aria-label={`${axis.toUpperCase()} position in pixels`} type="number" step="1" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { const next = Number(draft); if (draft.trim() && Number.isFinite(next)) onChange(next); else setDraft(formatted) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>px</span></label>
+  return <div className="quick-style-position">{axis.toUpperCase()}<NumericControl label={`${axis.toUpperCase()} position in pixels`} value={value} onChange={onChange} /><span>px</span></div>
 }
 
 function QuickStyleNumber({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void }) {
-  const [draft, setDraft] = useState(String(value))
-  useEffect(() => { setDraft(String(value)) }, [value])
-  return <label className="quick-style-position">{label}<input aria-label={label} type="number" min={min} max={max} step="1" value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => { const next = Number(draft); if (draft.trim() && Number.isFinite(next)) onChange(clamp(next, min, max)); else setDraft(String(value)) }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }} /><span>px</span></label>
+  return <div className="quick-style-position">{label}<NumericControl label={label} value={value} min={min} max={max} onChange={onChange} /><span>px</span></div>
 }
 
 function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAction }: {
@@ -4244,7 +4319,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
 }) {
   const changeText = (patch: Partial<DesignLayer>) => {
     const next = { ...layer, ...patch }
-    const height = next.textWrap ? Math.max(next.height, textLines(next).length * (next.fontSize || 32) * (next.lineHeight || 1.2)) : next.height
+    const height = next.textWrap ? Math.max(next.height, textLines(next).length * (next.fontSize || 32) * (next.lineHeight ?? 1.2)) : next.height
     onUpdate({ ...patch, height })
   }
   const keepFocus = (event: React.PointerEvent<HTMLButtonElement>) => event.preventDefault()
@@ -4255,9 +4330,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
           {alignment === 'left' ? <AlignLeft /> : alignment === 'center' ? <AlignCenter /> : alignment === 'right' ? <AlignRight /> : <AlignJustify />}
         </button>)}
         <span className="quick-style-divider" />
-        <button aria-label="Decrease font size" onPointerDown={keepFocus} onClick={() => changeText({ fontSize: Math.max(1, (layer.fontSize || 32) - 1) })}><Minus /></button>
-        <span className="quick-style-size" aria-label={`Font size ${layer.fontSize || 32} pixels`}>{layer.fontSize || 32}</span>
-        <button aria-label="Increase font size" onPointerDown={keepFocus} onClick={() => changeText({ fontSize: Math.min(1000, (layer.fontSize || 32) + 1) })}><Plus /></button>
+        <div className="quick-style-position">Size <NumericControl label="Font size" value={layer.fontSize || 32} min={1} max={1000} onChange={(fontSize) => changeText({ fontSize })} /><span>px</span></div>
         <span className="quick-style-divider" />
         <button aria-label="Bold" aria-pressed={(layer.fontWeight || 400) >= 700} onPointerDown={keepFocus} onClick={() => changeText({ fontWeight: (layer.fontWeight || 400) >= 700 ? 400 : 700 })}><Bold /></button>
         <button aria-label="Italic" aria-pressed={layer.fontStyle === 'italic'} onPointerDown={keepFocus} onClick={() => changeText({ fontStyle: layer.fontStyle === 'italic' ? 'normal' : 'italic' })}><Italic /></button>
@@ -4282,7 +4355,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
         <button className="quick-style-text" onClick={onMaskMore}>Mask details</button>
         <span className="quick-style-divider" />
       </>}
-      {layer.type !== 'text' && !layer.isEmpty && <label className="mask-strength-control"><span>Opacity</span><input type="range" aria-label="Object opacity" min="0" max="100" value={Math.round(layer.opacity * 100)} onChange={(event) => onUpdate({ opacity: Number(event.target.value) / 100 })} /><output>{Math.round(layer.opacity * 100)}%</output></label>}
+      {layer.type !== 'text' && !layer.isEmpty && <label className="mask-strength-control"><span>Opacity</span><input type="range" aria-label="Object opacity" min="0" max="100" value={Math.round(layer.opacity * 100)} onChange={(event) => onUpdate({ opacity: Number(event.target.value) / 100 })} /><NumericControl label="Object opacity value" value={Math.round(layer.opacity * 100)} min={0} max={100} onChange={(opacity) => onUpdate({ opacity: opacity / 100 })} /></label>}
       {(['x', 'y'] as const).map((axis) => <QuickPositionInput key={axis} axis={axis} value={layer[axis]} onChange={(value) => onUpdate({ [axis]: value })} />)}
       <button className="quick-style-more" onPointerDown={keepFocus} onClick={onMore}>More</button>
       <button aria-label="Close quick style" onPointerDown={keepFocus} onClick={onClose}><X /></button>
@@ -4296,12 +4369,13 @@ type MobileToolAction =
   | 'polygon-mask' | 'wand-mask'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
-function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMode, onAction }: {
+function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMode, quickStyleAction, onAction }: {
   activeTool: Tool
   selected: DesignLayer | null
   editingText: boolean
   canClip: boolean
   maskBrushMode: MaskBrushMode
+  quickStyleAction: MobileToolAction | null
   onAction: (action: MobileToolAction) => void
 }) {
   type Item = { label: string; icon: ReactNode; action: MobileToolAction; active?: boolean; danger?: boolean; disabled?: boolean }
@@ -4385,7 +4459,12 @@ function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMo
 
   return (
     <nav className={`mobile-toolbar ${selected ? 'selection-toolbar' : ''}`} aria-label={selected ? `${selected.name} actions` : 'Design tools'}>
-      {items.map((item) => <button key={`${item.action}-${item.label}`} className={`${item.active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} disabled={item.disabled} onPointerDown={editingText && (item.action === 'finish-text' || item.action === 'properties' || item.action === 'align') ? (event) => event.preventDefault() : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>)}
+      {items.map((item) => {
+        const isQuickStyleAction = item.action === 'properties' || item.action === 'fill' || item.action === 'shape-mask' || (item.action === 'align' && selected?.type === 'text')
+        const active = Boolean(item.active || (isQuickStyleAction && quickStyleAction === item.action))
+        const isToggle = isQuickStyleAction || ['select', 'object-select', 'polygon-mask', 'wand-mask', 'corners', 'crop', 'mask-hide', 'mask-restore'].includes(item.action)
+        return <button key={`${item.action}-${item.label}`} className={`${active ? 'active' : ''} ${item.danger ? 'danger' : ''}`} aria-pressed={isToggle ? active : undefined} disabled={item.disabled} onPointerDown={editingText && (item.action === 'finish-text' || item.action === 'properties' || item.action === 'align') ? (event) => event.preventDefault() : undefined} onClick={() => onAction(item.action)}>{item.icon}<span>{item.label}</span></button>
+      })}
     </nav>
   )
 }
@@ -4577,15 +4656,20 @@ function MouseSettingsPanel({ settings, onChange }: { settings: MouseSettings; o
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
     { id: 'new', label: 'New design', icon: <Plus /> },
+    { id: 'open-psd', label: 'Open PSD', icon: <FileText /> },
+    { id: 'open-ai', label: 'Open Illustrator file', icon: <FileText /> },
     { id: 'object-select', label: 'Object selection', icon: <ScanSearch /> },
     { id: 'polygon-mask', label: 'Polygonal selection', icon: <LassoSelect /> },
     { id: 'wand-mask', label: 'Magic wand', icon: <WandSparkles /> },
     { id: 'paint-brush', label: 'Brush', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
+    { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
     { id: 'artboards', label: 'Manage artboards', icon: <Frame /> },
+    { id: 'help', label: 'Help and guides', icon: <HelpCircle /> },
+    { id: 'carousel-settings', label: 'Carousel divisions', icon: <LayoutGrid /> },
     { id: 'grid', label: 'Layout grid', icon: <Grid3X3 /> },
     { id: 'rulers', label: 'Rulers and guides', icon: <Ruler /> },
     { id: 'settings', label: 'Design settings', icon: <Settings2 /> },
@@ -4593,6 +4677,172 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'export', label: 'Export design', icon: <Download /> },
   ]
   return <div className="more-menu-list">{actions.map((action) => <button key={action.id} onClick={() => onAction(action.id)}>{action.icon}<span>{action.label}</span><ChevronRight /></button>)}</div>
+}
+
+function PsdImportDialog({ kind, onClose, onImport }: { kind: 'psd' | 'ai'; onClose: () => void; onImport: (name: string, width: number, height: number, image: string) => void }) {
+  const [file, setFile] = useState<File | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const ref = useRef<HTMLElement>(null)
+  const closeRef = useRef(onClose)
+  const busyRef = useRef(false)
+  useEffect(() => { closeRef.current = onClose }, [onClose])
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = ref.current; dialog?.focus()
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !busyRef.current) { event.preventDefault(); event.stopImmediatePropagation(); closeRef.current(); return }
+      if (event.key !== 'Tab' || !dialog) return
+      const items = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)')].filter((item) => item.getClientRects().length > 0)
+      if (!items.length) { event.preventDefault(); dialog.focus(); return }
+      if (event.shiftKey && (document.activeElement === items[0] || document.activeElement === dialog)) { event.preventDefault(); items[items.length - 1].focus() }
+      else if (!event.shiftKey && document.activeElement === items[items.length - 1]) { event.preventDefault(); items[0].focus() }
+    }
+    window.addEventListener('keydown', keydown, true)
+    return () => { window.removeEventListener('keydown', keydown, true); if (previous?.isConnected) previous.focus(); else document.querySelector<HTMLElement>('.help-button')?.focus() }
+  }, [])
+  const runImport = async () => {
+    if (!file || busyRef.current) return
+    busyRef.current = true; setBusy(true); setError('')
+    try {
+      if (!new RegExp(`\\.${kind}$`, 'i').test(file.name)) throw new Error(kind === 'ai' ? 'Choose an Illustrator .ai file.' : 'Choose a Photoshop .psd file. PSB files are not supported.')
+      if (file.size > 100 * 1024 * 1024) throw new Error('The file is too large. Choose a file under 100 MB.')
+      const buffer = await file.arrayBuffer()
+      let width: number, height: number, src: string
+      if (kind === 'psd') {
+        if (buffer.byteLength < 26) throw new Error('This file is not a valid PSD.')
+        const data = new DataView(buffer)
+        if (data.getUint32(0) !== 0x38425053 || data.getUint16(4) !== 1) throw new Error('This file is not a supported PSD. PSB files are not supported.')
+        height = data.getUint32(14); width = data.getUint32(18)
+        if (!width || !height || width > 16384 || height > 16384 || width * height > 40000000) throw new Error('PSD dimensions exceed the supported canvas size.')
+        const { readPsd } = await import('ag-psd')
+        const psd = readPsd(buffer, { skipLayerImageData: true, skipThumbnail: true, skipLinkedFilesData: true, imageResourcesWhitelist: [], totalMemoryLimit: 256 * 1024 * 1024 })
+        if (!psd.canvas || psd.canvas.width !== width || psd.canvas.height !== height) throw new Error('No saved composite image was found. Re-save the PSD with Maximize Compatibility enabled.')
+        src = psd.canvas.toDataURL('image/png')
+      } else {
+        const header = new TextDecoder('latin1').decode(new Uint8Array(buffer, 0, Math.min(1024, buffer.byteLength)))
+        if (!header.includes('%PDF-')) throw new Error('This AI file has no PDF-compatible content. Re-save it in Illustrator with Create PDF Compatible File enabled.')
+        const pdfjs = await import('pdfjs-dist')
+        const worker = await import('pdfjs-dist/build/pdf.worker.min.mjs?url')
+        pdfjs.GlobalWorkerOptions.workerSrc = worker.default
+        const task = pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, useSystemFonts: true, stopAtErrors: true })
+        try {
+          const pdf = await task.promise
+          const page = await pdf.getPage(1)
+          const viewport = page.getViewport({ scale: 96 / 72 })
+          width = Math.ceil(viewport.width); height = Math.ceil(viewport.height)
+          if (!width || !height || width > 16384 || height > 16384 || width * height > 40000000) throw new Error('Illustrator dimensions exceed the supported canvas size.')
+          const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height
+          const context = canvas.getContext('2d'); if (!context) throw new Error('The Illustrator image could not be rendered.')
+          await page.render({ canvasContext: context, viewport, background: 'rgba(0,0,0,0)' }).promise
+          src = canvas.toDataURL('image/png')
+        } finally { await task.destroy() }
+      }
+      if (!src.startsWith('data:image/png') || src.length < 30) throw new Error('The image could not be decoded.')
+      onImport(file.name, width, height, src)
+    } catch (cause) {
+      console.error('File import failed', cause)
+      const message = cause instanceof Error && /^(Choose|The file|This file|This AI file|PSD dimensions|Illustrator dimensions|No saved|The image|The Illustrator image)/.test(cause.message) ? cause.message : kind === 'ai' ? 'Could not read this Illustrator file. Re-save it with Create PDF Compatible File enabled.' : 'Could not read this PSD. It may be damaged, unsupported, or missing a compatible composite. Try saving it with Maximize Compatibility enabled.'
+      setError(message); busyRef.current = false; setBusy(false)
+    }
+  }
+  return <div className="dialog-layer help-layer">
+    <button className="dialog-scrim" aria-label={kind === 'ai' ? 'Close AI import' : 'Close PSD import'} tabIndex={-1} disabled={busy} onClick={onClose} />
+    <section className="help-dialog psd-dialog" role="dialog" aria-modal="true" aria-labelledby="psd-title" tabIndex={-1} ref={ref}>
+      <div className="dialog-header"><div><span className="dialog-icon"><FileText size={19} /></span><div><h2 id="psd-title">{kind === 'ai' ? 'Open Illustrator file' : 'Open PSD'}</h2><p>Import a file from this device.</p></div></div><IconButton label="Close PSD import" disabled={busy} onClick={onClose}><X /></IconButton></div>
+      <div className="psd-import-content"><p>{kind === 'ai' ? 'PDF-compatible Illustrator files open as one flattened image of the first page at 96 pixels per inch. Vector paths, layers and text will not remain editable. Your original file is unchanged.' : 'PSD files open as one flattened image using the saved composite. Photoshop layers, editable text, masks and effects will not remain editable. Your original PSD is unchanged.'}</p><p><strong>Opening replaces the current on-device design.</strong> Export a Project backup first if you want to keep it.</p><label className="psd-file-label">{kind === 'ai' ? 'Choose an Illustrator file' : 'Choose a PSD file'}<input type="file" accept={kind === 'ai' ? '.ai,application/postscript,application/pdf' : '.psd,image/vnd.adobe.photoshop'} disabled={busy} onChange={(event) => { setFile(event.target.files?.[0] || null); setError('') }} /></label><small>{kind === 'ai' ? 'Requires Create PDF Compatible File. EPS and non-PDF-compatible AI files are not supported.' : 'Requires a saved composite.'} Files up to 100 MB. Processing stays on this device.</small>{error && <p role="alert" className="export-error">{error}</p>}</div>
+      <div className="dialog-footer"><button className="button secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="button primary" disabled={!file || busy} onClick={() => void runImport()}>{busy ? 'Opening…' : kind === 'ai' ? 'Open AI' : 'Open PSD'}</button></div>
+    </section>
+  </div>
+}
+
+const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = [
+  { title: 'Carousel: guides, knife and export', keywords: 'slides instagram cutting split zip 1080 1350', paragraphs: [
+    'Create a design with width 1080 * 3 and height 1350 for three portrait slides. Press Enter or leave the field to calculate the width as 3240. Design across the whole canvas.',
+    'For equal divisions, open Design settings → Canvas → Carousel divisions. On a phone, open More → Carousel divisions. Choose Across and 3 parts, then select Add equal divisions. These guides mark the slide edges; drag them to reposition them.',
+    'For custom cuts, choose Knife tool from the desktop tool rail or phone More menu. Select Vertical for side-by-side slides or Horizontal for stacked slides, then tap the canvas where each cut should go. Press Done when finished. Cuts are non-destructive; they do not split or delete your artwork.',
+    'Open Export, choose PNG or JPG, and turn on Export carousel slides. Choose Across for vertical cuts or Down for horizontal cuts. Under Division method select Knife and division guides. Set slide width to 1080 and height to 1350, then select Export. Open the downloaded ZIP to find the numbered image files.',
+    'Alternatively choose Equal parts and enter 3 to export equal slides without using cuts. Export uses the current artboard. Each slice is resized to the requested output size, so matching proportions prevent stretching. Guides and cuts are saved in this browser, not inside Project backups.'
+  ] },
+  { title: 'Find your way around', keywords: 'navigation workspace phone desktop menu top toolbar properties mobile', paragraphs: [
+    'The home screen contains recent designs, New design and project import. In the editor, the top bar has the project name, undo, redo, save, help and export.',
+    'On desktop, tools and Layers are on the left, the canvas is in the centre and Properties are on the right. On a phone, use the bottom toolbar and More menu. Select an object to show its contextual actions; the quick toolbar directly above the bottom toolbar may scroll horizontally for more options.',
+    'Tap an empty area to deselect. On a phone, tap an empty area first if More is not visible, then use More → Design settings for canvas settings. Help is available from the question-mark button at the top or More → Help and guides.'
+  ] },
+  { title: 'Create, save and manage artboards', keywords: 'new size dimensions project artboard switch delete import backup', paragraphs: [
+    'Choose New design, select a preset or enter custom width and height. Dimensions accept multiplication such as 1080 * 3. Choose a background and select Create design.',
+    'Open PSD on the home screen, or File → Open PSD on desktop / More → Open PSD on a phone. PSD files open as a single flattened image using their saved composite; Photoshop layers, editable text, masks and effects do not remain editable. Save the current design as a Project backup before opening another design.',
+    'Open AI on the home screen, or File → Open Illustrator file on desktop / More → Open Illustrator file on a phone. AI files must be saved with Create PDF Compatible File enabled. The first PDF page opens as a flattened image; Illustrator paths and text are not editable. EPS is not supported; export an SVG or PNG from Illustrator instead.',
+    'Designs save automatically on this device. Use Save for an immediate save. Export → Project creates an editable .pocket backup; Import project on the home screen restores it. Browser storage can be cleared, so keep backups.',
+    'Use Manage artboards from More on a phone or the artboard controls on desktop to add, switch or delete artboards. On touch, long-press an artboard to open the artboard list. Deleting an artboard removes its layers.'
+  ] },
+  { title: 'Select, move, resize and zoom', keywords: 'transform select rotation handle pinch pan corners proportions', paragraphs: [
+    'Use Select and tap or click an object. Drag it to move. Drag a corner handle to resize proportionally, a side handle to change one dimension, or the rotation handle to rotate. Text wraps when resized from a side.',
+    'Numeric fields accept signed values where meaningful. Type a value and press Enter or leave the field; use the up and down buttons or arrow keys to adjust it. Press and hold a button for continuous adjustment. Dimensions and percentages keep their valid limits.',
+    'Use the Corner tool for supported shapes. Tap outside an object to deselect it. Pinch with two fingers to zoom the workspace; use the zoom controls or Zoom tool on desktop. Use the Hand tool to pan on desktop.'
+  ] },
+  { title: 'Layers and multiple selection', keywords: 'layers order arrange lock visibility duplicate clip group assets', paragraphs: [
+    'Open Layers from the bottom toolbar on a phone or the left panel on desktop. A normal tap or click selects one layer. Drag layer rows to reorder; use the visibility and lock controls to hide or protect a layer. The plus button creates an empty layer, and Assets contains built-in shapes.',
+    'Long-press a layer on a phone or right-click it on desktop to start multiple selection, then select more rows. Choose Done selecting to exit. Desktop modifier selection also works on the canvas. Use the available group controls for common operations.',
+    'Select Clip to clip an object to the layer directly below it. Reordering changes which layer is below. Duplicate, delete, alignment and arrangement controls are available in the layer or object actions.'
+  ] },
+  { title: 'Text and fonts', keywords: 'type edit typography alignment bold italic justify install font', paragraphs: [
+    'Choose Text and place it on the canvas. Select text once to transform it; double-tap or double-click it to edit its contents. On a phone, use Edit text or Done to enter or finish editing.',
+    'Use Style for the quick toolbar above the bottom toolbar: alignment, size and basic formatting. Scroll the toolbar for more controls and choose More for detailed properties, colours, fonts and spacing. Font import and available font search are in the font controls.'
+  ] },
+  { title: 'Shapes, colour and effects', keywords: 'rectangle ellipse polygon star fill stroke opacity gradient blur palette', paragraphs: [
+    'Choose Shapes on a phone or a shape tool on desktop. The Assets panel offers more built-in shapes. Select a shape and use Edit or Fill for its quick toolbar, including fill, stroke and opacity. More opens detailed settings such as gradients.',
+    'Use colour controls to choose a colour or sample one from the canvas. Properties also provide alignment, blend and blur effects where supported. Image palette extracts colours from a selected image.'
+  ] },
+  { title: 'Images, crop and masks', keywords: 'image import photo crop mask brush clipping polygon magic wand feather tolerance', paragraphs: [
+    'Use Image to place a local image. Select it to access Crop, Mask shape, Polygonal, Magic wand and Mask brush. Crop moves the image inside its mask; Mask shape chooses a rectangular, rounded, elliptical or star boundary.',
+    'Polygonal selection: tap around the region, choose Keep selection or Mask selection out, then Apply selection. Magic wand: set tolerance and feather, choose an action, then tap a colour in the image. The wand selects contiguous similar colours; it is not AI background removal.',
+    'Mask brush works on a selected object. Use Hide to conceal and Restore to reveal; adjust size, hardness, opacity and flow. In Layers, tapping a mask thumbnail reopens mask editing. Masks do not permanently erase the original object.'
+  ] },
+  { title: 'Brush and pen', keywords: 'paint draw strokes hardness soft hard pen bezier curve straight', paragraphs: [
+    'Brush paints the foreground colour when no mask is being edited. Set foreground and background colours, size, hardness, opacity and flow in the brush controls. Soft and Hard are hardness presets.',
+    'The Pen tool offers Straight and Curve modes. Tap to place straight points or drag anchors to create curves; select Finish path or tap the first point to close a shape. Finished path handles cannot currently be edited.'
+  ] },
+  { title: 'Grid, rulers and guides', keywords: 'grid guides snapping layout size ruler clear move', paragraphs: [
+    'Open Design settings → Canvas to toggle Layout grid or Rulers and guides. Adjust grid spacing, add vertical or horizontal guides, and drag guides to reposition them. Clear guides removes the current guides.',
+    'Carousel divisions and Knife cuts are special guides used by carousel export; ordinary grid lines and ordinary guides are not export cuts. Guides do not appear in exported images.'
+  ] },
+  { title: 'Export, share and shortcuts', keywords: 'download png jpeg jpg svg pdf project keyboard save undo', paragraphs: [
+    'Export offers PNG, JPG, SVG, PDF and Project. Set the file name and available format options before exporting. PNG supports a transparent background; JPG has a quality control. Carousel ZIP export is available for PNG and JPG.',
+    'Use Undo and Redo in the top bar. Common desktop shortcuts include Ctrl or Cmd + Z to undo, Shift + Ctrl or Cmd + Z to redo, Ctrl or Cmd + S to save, and Delete to remove a selected unlocked object. Use arrow keys to nudge a selection.'
+  ] },
+]
+
+function HelpDialog({ onClose }: { onClose: () => void }) {
+  const [query, setQuery] = useState('')
+  const dialogRef = useRef<HTMLElement>(null)
+  const closeRef = useRef(onClose)
+  useEffect(() => { closeRef.current = onClose }, [onClose])
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    dialog?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); closeRef.current(); return }
+      if (event.key !== 'Tab' || !dialog) return
+      const items = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), summary, [href], [tabindex]:not([tabindex="-1"])')].filter((item) => item.getClientRects().length > 0)
+      if (!items.length) { event.preventDefault(); dialog.focus(); return }
+      if (event.shiftKey && (document.activeElement === items[0] || document.activeElement === dialog)) { event.preventDefault(); items[items.length - 1].focus() }
+      else if (!event.shiftKey && document.activeElement === items[items.length - 1]) { event.preventDefault(); items[0].focus() }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => { window.removeEventListener('keydown', onKeyDown, true); if (previous?.isConnected) previous.focus(); else document.querySelector<HTMLElement>('.help-button')?.focus() }
+  }, [])
+  const term = query.trim().toLowerCase()
+  const topics = helpTopics.filter((topic) => !term || `${topic.title} ${topic.keywords} ${topic.paragraphs.join(' ')}`.toLowerCase().includes(term))
+  return <div className="dialog-layer help-layer">
+    <button className="dialog-scrim" aria-label="Close help" tabIndex={-1} onClick={onClose} />
+    <section className="help-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="help-title" tabIndex={-1}>
+      <div className="dialog-header"><div><span className="dialog-icon"><HelpCircle size={19} /></span><div><h2 id="help-title">Help and guides</h2><p>Find tools and learn the workflow.</p></div></div><IconButton label="Close help" onClick={onClose}><X /></IconButton></div>
+      <div className="help-search"><Search size={17} /><input type="search" aria-label="Search help" placeholder="Search help" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+      <div className="help-content">{topics.length ? topics.map((topic, index) => <details key={`${term}-${topic.title}`} open={Boolean(term) || index === 0 ? true : undefined}><summary>{topic.title}<ChevronDown size={17} /></summary><div>{topic.paragraphs.map((paragraph, i) => <p key={i}>{paragraph}</p>)}</div></details>) : <p role="status">No matching topics. Try another search.</p>}</div>
+    </section>
+  </div>
 }
 
 function Toast({ message, onClose }: { message: string; onClose: () => void }) {
@@ -4604,20 +4854,31 @@ interface ExportDialogProps {
   documentMeta: DesignDocument
   layers: DesignLayer[]
   artboards: ArtboardSnapshot[]
+  guides: CanvasGuide[]
   onClose: () => void
   onSuccess: (message: string) => void
 }
 
 function ExportDialog(props: ExportDialogProps) {
   const [format, setFormat] = useState<ExportFormat>('PNG')
+  const [carousel, setCarousel] = useState(false)
+  const [sliceSource, setSliceSource] = useState<'equal' | 'guides'>('equal')
+  const [carouselAxis, setCarouselAxis] = useState<'x' | 'y'>('x')
+  const [carouselCount, setCarouselCount] = useState(3)
+  const [slideWidth, setSlideWidth] = useState(Math.max(1, Math.round(props.documentMeta.width / 3)))
+  const [slideHeight, setSlideHeight] = useState(Math.round(props.documentMeta.height))
+  const boundaries = props.guides.filter((guide) => guide.slice && guide.axis === carouselAxis && guide.position > 0 && guide.position < (carouselAxis === 'x' ? props.documentMeta.width : props.documentMeta.height)).map((guide) => guide.position).sort((a, b) => a - b).filter((value, index, array) => index === 0 || value - array[index - 1] > 0.01)
+  const carouselActive = carousel && (format === 'PNG' || format === 'JPG')
+  const slideCount = sliceSource === 'equal' ? carouselCount : boundaries.length + 1
+
   const [scale, setScale] = useState(1)
   const [transparent, setTransparent] = useState(false)
   const [quality, setQuality] = useState(92)
   const [fileName, setFileName] = useState(props.projectName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'design')
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
-  const outputWidth = props.documentMeta.width * scale
-  const outputHeight = props.documentMeta.height * scale
+  const outputWidth = carouselActive ? slideWidth : props.documentMeta.width * scale
+  const outputHeight = carouselActive ? slideHeight : props.documentMeta.height * scale
   const estimatedMb = Math.max(0.2, outputWidth * outputHeight * (format === 'JPG' ? 0.22 : 0.52) / 1_000_000).toFixed(1)
 
   const runExport = async () => {
@@ -4627,11 +4888,12 @@ function ExportDialog(props: ExportDialogProps) {
       await exportDesign({
         format, scale, transparent, quality, fileName,
         documentMeta: props.documentMeta, layers: props.layers, artboards: props.artboards,
+        carousel: carouselActive ? { axis: carouselAxis, count: carouselCount, boundaries: sliceSource === 'guides' ? boundaries : undefined, width: slideWidth, height: slideHeight } : undefined,
       })
-      props.onSuccess(`${format === 'PROJECT' ? 'Project' : format} exported`)
+      props.onSuccess(carouselActive ? `${slideCount} carousel slides exported` : `${format === 'PROJECT' ? 'Project' : format} exported`)
     } catch (error) {
       console.error(error)
-      setExportError('Export failed. Check that the project fonts are available and try again.')
+      setExportError(error instanceof Error ? error.message : 'Export failed. Check that the project fonts are available and try again.')
       setExporting(false)
     }
   }
@@ -4651,19 +4913,27 @@ function ExportDialog(props: ExportDialogProps) {
               </button>
             ))}
           </div>
-          <label className="export-field"><span>File name</span><div><input value={fileName} onChange={(event) => setFileName(event.target.value)} /><small>.{format === 'PROJECT' ? 'pocket' : format.toLowerCase()}</small></div></label>
-          {format !== 'SVG' && format !== 'PROJECT' && (
+          <label className="export-field"><span>File name</span><div><input value={fileName} onChange={(event) => setFileName(event.target.value)} /><small>.{carouselActive ? 'zip' : format === 'PROJECT' ? 'pocket' : format.toLowerCase()}</small></div></label>
+          {format !== 'SVG' && format !== 'PROJECT' && !carouselActive && (
             <div className="export-row"><span>Scale</span><div className="segmented scale-control">{[1, 2, 3].map((item) => <button key={item} className={scale === item ? 'selected' : ''} onClick={() => setScale(item)}>{item}×</button>)}</div></div>
           )}
           {format === 'JPG' && <SliderField label="Quality" value={quality} min={1} max={100} unit="%" onChange={setQuality} />}
           {format === 'PNG' && <ToggleRow label="Transparent background" checked={transparent} onChange={setTransparent} />}
+          {(format === 'PNG' || format === 'JPG') && <><ToggleRow label="Export carousel slides" checked={carousel} onChange={setCarousel} />{carousel && <div className="carousel-export-controls">
+            <label>Divide <select value={carouselAxis} onChange={(event) => { const axis = event.target.value as 'x' | 'y'; setCarouselAxis(axis); setSlideWidth(Math.max(1, Math.round(props.documentMeta.width / (axis === 'x' ? carouselCount : 1)))); setSlideHeight(Math.max(1, Math.round(props.documentMeta.height / (axis === 'y' ? carouselCount : 1)))) }}><option value="x">Across</option><option value="y">Down</option></select></label>
+            <label>Division method <select value={sliceSource} onChange={(event) => setSliceSource(event.target.value as 'equal' | 'guides')}><option value="equal">Equal parts</option><option value="guides">Knife and division guides</option></select></label>
+            {sliceSource === 'equal' ? <div className="numeric-labeled">Number of slides <NumericControl label="Number of slides" min={2} max={50} integer value={carouselCount} onChange={(value) => { const count = Math.round(value); setCarouselCount(count); if (carouselAxis === 'x') setSlideWidth(Math.max(1, Math.round(props.documentMeta.width / count))); else setSlideHeight(Math.max(1, Math.round(props.documentMeta.height / count))) }} /></div> : <small>{boundaries.length ? `${slideCount} slides from ${boundaries.length} cuts` : 'Add knife cuts or equal divisions to the canvas first.'}</small>}
+            <label>Slide width (px) <DimensionInput label="Slide width" value={slideWidth} onChange={setSlideWidth} /></label><label>Slide height (px) <DimensionInput label="Slide height" value={slideHeight} onChange={setSlideHeight} /></label>
+            <small>Each part is resized to these dimensions and saved in order in a ZIP file. Use matching proportions to avoid stretching.</small>
+          </div>}</>}
+
           <div className="output-summary">
             <div className="output-preview"><div style={{ aspectRatio: `${props.documentMeta.width}/${props.documentMeta.height}` }}><PosterMini /></div></div>
-            <div><span>Output size</span><strong>{format === 'SVG' || format === 'PROJECT' ? 'Vector document' : `${outputWidth} × ${outputHeight} px`}</strong><small>Estimated {estimatedMb} MB</small></div>
+            <div><span>{carouselActive ? `${slideCount} slides · each` : 'Output size'}</span><strong>{format === 'SVG' || format === 'PROJECT' ? 'Vector document' : `${outputWidth} × ${outputHeight} px`}</strong><small>Estimated {estimatedMb} MB</small></div>
           </div>
         </div>
         {exportError && <p className="export-error" role="alert">{exportError}</p>}
-        <div className="dialog-footer"><button className="button secondary" onClick={props.onClose}>Cancel</button><button className="button primary export-confirm" disabled={exporting} onClick={runExport}>{exporting ? <span className="spinner" /> : <Download size={17} />}{exporting ? 'Preparing…' : 'Export'}</button></div>
+        <div className="dialog-footer"><button className="button secondary" onClick={props.onClose}>Cancel</button><button className="button primary export-confirm" disabled={exporting || (carouselActive && sliceSource === 'guides' && !boundaries.length)} onClick={runExport}>{exporting ? <span className="spinner" /> : <Download size={17} />}{exporting ? 'Preparing…' : 'Export'}</button></div>
       </section>
     </div>
   )
@@ -4682,6 +4952,7 @@ type ExportOptions = {
   documentMeta: DesignDocument
   layers: DesignLayer[]
   artboards: ArtboardSnapshot[]
+  carousel?: { axis: 'x' | 'y'; count: number; boundaries?: number[]; width: number; height: number }
 }
 
 async function exportDesign(options: ExportOptions) {
@@ -4701,6 +4972,36 @@ async function exportDesign(options: ExportOptions) {
   await ensureLayerFonts(embeddedLayers)
   await document.fonts.ready
   const svg = buildSvg(embeddedLayers, options.documentMeta, includeBackground)
+  if (options.carousel && (options.format === 'PNG' || options.format === 'JPG')) {
+    const { axis, count, boundaries, width, height } = options.carousel
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 16384 || height > 16384 || width * height > 64000000) throw new Error('Slide dimensions must be whole pixels within the supported canvas size.')
+    const length = axis === 'x' ? options.documentMeta.width : options.documentMeta.height
+    const cuts = boundaries ? [0, ...boundaries, length] : Array.from({ length: count + 1 }, (_, i) => length * i / count)
+    const files: Record<string, Uint8Array> = {}
+    const safePartName = safeName.replace(/[\\/]/g, '-') || 'design'
+    for (let index = 0; index < cuts.length - 1; index++) {
+      const start = cuts[index], extent = cuts[index + 1] - start
+      const x = axis === 'x' ? start : 0, y = axis === 'y' ? start : 0
+      const w = axis === 'x' ? extent : options.documentMeta.width, h = axis === 'y' ? extent : options.documentMeta.height
+      const slicedSvg = svg.replace(`width="${options.documentMeta.width}" height="${options.documentMeta.height}" viewBox="0 0 ${options.documentMeta.width} ${options.documentMeta.height}"`, `width="${width}" height="${height}" viewBox="${x} ${y} ${w} ${h}" preserveAspectRatio="none"`)
+      const url = URL.createObjectURL(new Blob([slicedSvg], { type: 'image/svg+xml' }))
+      try {
+        const image = new Image(); image.src = url; await image.decode()
+        const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height
+        const context = canvas.getContext('2d'); if (!context) throw new Error('Could not create the slide canvas.')
+        context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high'
+        if (options.format === 'JPG') { context.fillStyle = options.documentMeta.background; context.fillRect(0, 0, width, height) }
+        context.drawImage(image, 0, 0, width, height)
+        const mime = options.format === 'JPG' ? 'image/jpeg' : 'image/png'
+        const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((result) => result ? resolve(result) : reject(new Error('Could not render a carousel slide.')), mime, options.quality / 100))
+        files[`${safePartName}-${String(index + 1).padStart(2, '0')}.${options.format.toLowerCase()}`] = new Uint8Array(await blob.arrayBuffer())
+      } finally { URL.revokeObjectURL(url) }
+    }
+    const { zipSync } = await import('fflate')
+    const zipped = zipSync(files, { level: 0 })
+    downloadBlob(new Blob([zipped as BlobPart], { type: 'application/zip' }), `${safePartName}-carousel.zip`)
+    return
+  }
   if (options.format === 'SVG') {
     downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), `${safeName}.svg`)
     return
@@ -4880,13 +5181,13 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
-    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLineDetails(layer).map((line, index) => { const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []; return `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight || 1.2)}">${words.length ? words.map((word) => `<tspan x="${x + word.offset}">${escapeXml(word.text)}</tspan>`).join('') : escapeXml(line.text)}</tspan>` }).join('')}</text>`)
+    return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLineDetails(layer).map((line, index) => { const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []; return `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight ?? 1.2)}">${words.length ? words.map((word) => `<tspan x="${x + word.offset}">${escapeXml(word.text)}</tspan>`).join('') : escapeXml(line.text)}</tspan>` }).join('')}</text>`)
   }).join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="100%" height="100%" fill="${meta.background}"/>` : ''}${body}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="${meta.width}" height="${meta.height}" fill="${meta.background}"/>` : ''}${body}</svg>`
 }
 
-function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpenCurrent, currentName, hasCurrent }: {
-  theme: Theme; onToggleTheme: () => void; onNew: () => void; onImport: (file: File) => void; onOpenSample: () => void; onOpenCurrent: () => void; currentName: string; hasCurrent: boolean
+function HomeScreen({ theme, onToggleTheme, onNew, onHelp, onOpenPsd, onOpenAi, onImport, onOpenSample, onOpenCurrent, currentName, hasCurrent }: {
+  theme: Theme; onToggleTheme: () => void; onNew: () => void; onHelp: () => void; onOpenPsd: () => void; onOpenAi: () => void; onImport: (file: File) => void; onOpenSample: () => void; onOpenCurrent: () => void; currentName: string; hasCurrent: boolean
 }) {
   const importInputRef = useRef<HTMLInputElement>(null)
   const [backupHelp, setBackupHelp] = useState(false)
@@ -4896,7 +5197,7 @@ function HomeScreen({ theme, onToggleTheme, onNew, onImport, onOpenSample, onOpe
       <main className="home-main">
         <section className="home-intro">
           <div><span className="eyebrow">Your workspace</span><h1>Designs</h1><p>Everything stays on this device, ready whenever you are.</p></div>
-          <div className="home-actions"><button className="button secondary" onClick={() => importInputRef.current?.click()}><Upload size={17} /> Import project</button><button className="button primary" onClick={onNew}><Plus size={18} /> New design</button></div>
+          <div className="home-actions"><button className="button secondary" onClick={onOpenPsd}><FileText size={17} /> Open PSD</button><button className="button secondary" onClick={onOpenAi}><FileText size={17} /> Open AI</button><button className="button secondary" onClick={onHelp}><HelpCircle size={17} /> Help</button><button className="button secondary" onClick={() => importInputRef.current?.click()}><Upload size={17} /> Import project</button><button className="button primary" onClick={onNew}><Plus size={18} /> New design</button></div>
         </section>
         <section className="recent-section">
           <div className="section-title-row"><div><h2>Recent designs</h2><span>{hasCurrent ? 4 : 3} designs</span></div></div>
@@ -4940,7 +5241,7 @@ function PosterMini() {
   return <div className="poster-mini"><span className="mini-orange" /><img src="/editorial-chair.jpg" alt="" /><strong>OBJECTS<br />FOR LIVING</strong><span className="mini-blue"><b>04</b><small>NORTHLINE STUDIO</small></span></div>
 }
 
-function NewDesignScreen({ theme, onToggleTheme, onBack, onCreate }: { theme: Theme; onToggleTheme: () => void; onBack: () => void; onCreate: (meta: DesignDocument, name: string) => void }) {
+function NewDesignScreen({ theme, onToggleTheme, onBack, onCreate, onHelp }: { theme: Theme; onToggleTheme: () => void; onBack: () => void; onCreate: (meta: DesignDocument, name: string) => void; onHelp: () => void }) {
   const [selectedPreset, setSelectedPreset] = useState(presets[1])
   const [width, setWidth] = useState(selectedPreset.width)
   const [height, setHeight] = useState(selectedPreset.height)
@@ -4954,7 +5255,7 @@ function NewDesignScreen({ theme, onToggleTheme, onBack, onCreate }: { theme: Th
   const meta: DesignDocument = { width, height, unit, dpi, background, presetName: selectedPreset.name }
   return (
     <div className="new-design-screen">
-      <header className="new-header"><button className="home-brand" onClick={onBack}><LogoMark /><span>Pocketboard</span></button><div><IconButton label={theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={onToggleTheme}>{theme === 'light' ? <Moon /> : <Sun />}</IconButton><button className="button secondary" onClick={onBack}>Cancel</button><button className="button primary" onClick={() => onCreate(meta, name)}>Create design</button></div></header>
+      <header className="new-header"><button className="home-brand" onClick={onBack}><LogoMark /><span>Pocketboard</span></button><div><IconButton label="Help" onClick={onHelp}><HelpCircle /></IconButton><IconButton label={theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={onToggleTheme}>{theme === 'light' ? <Moon /> : <Sun />}</IconButton><button className="button secondary" onClick={onBack}>Cancel</button><button className="button primary" onClick={() => onCreate(meta, name)}>Create design</button></div></header>
       <main className="new-main">
         <button className="back-link" onClick={onBack}><ArrowLeft size={16} /> Back to designs</button>
         <div className="new-title"><span className="eyebrow">Start something new</span><h1>New design</h1><p>Choose a preset or set custom dimensions.</p></div>
@@ -4966,8 +5267,8 @@ function NewDesignScreen({ theme, onToggleTheme, onBack, onCreate }: { theme: Th
             <div className="custom-card-heading"><span><SlidersHorizontal /></span><div><h2>Custom size</h2><p>Set exact canvas dimensions.</p></div></div>
             <label className="new-field"><span>Design name</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
             <div className="new-dimension-label"><span>Dimensions</span><button onClick={() => { setWidth(height); setHeight(width) }}><RotateCw size={14} /> Swap</button></div>
-            <div className="new-dimensions"><label><span>Width</span><input type="number" value={width} onChange={(event) => setWidth(Number(event.target.value))} /></label><span>×</span><label><span>Height</span><input type="number" value={height} onChange={(event) => setHeight(Number(event.target.value))} /></label><label className="unit-select"><span>Unit</span><select value={unit} onChange={(event) => setUnit(event.target.value as DesignDocument['unit'])}><option>px</option><option>mm</option><option>cm</option><option>in</option></select><ChevronDown size={14} /></label></div>
-            {unit !== 'px' && <label className="new-field"><span>Print resolution</span><div className="field-with-unit"><input type="number" value={dpi} onChange={(event) => setDpi(Number(event.target.value))} /><small>DPI</small></div></label>}
+            <div className="new-dimensions"><label><span>Width</span><DimensionInput label="Width" value={width} onChange={setWidth} /></label><span>×</span><label><span>Height</span><DimensionInput label="Height" value={height} onChange={setHeight} /></label><label className="unit-select"><span>Unit</span><select value={unit} onChange={(event) => setUnit(event.target.value as DesignDocument['unit'])}><option>px</option><option>mm</option><option>cm</option><option>in</option></select><ChevronDown size={14} /></label></div>
+            {unit !== 'px' && <label className="new-field"><span>Print resolution</span><div className="field-with-unit"><NumericControl label="Print resolution" value={dpi} min={1} max={9600} onChange={setDpi} /><small>DPI</small></div></label>}
             <div className="new-field"><span>Background</span><div className="background-choices">{['#FFFFFF', '#F4EEE4', '#18181B', '#5B4BF0'].map((colour) => <button key={colour} className={background === colour ? 'selected' : ''} onClick={() => setBackground(colour)} style={{ background: colour }} aria-label={`Background ${colour}`}>{background === colour && <Check size={13} />}</button>)}<label><Palette size={16} /><input type="color" value={background} onChange={(event) => setBackground(event.target.value)} /></label></div></div>
             <div className="custom-summary"><Monitor size={18} /><div><span>{width} × {height} {unit}</span><small>{unit === 'px' ? 'Screen design' : `${dpi} DPI print design`}</small></div></div>
             <button className="button primary full-button" onClick={() => onCreate(meta, name)}>Create design <ChevronRight size={17} /></button>

@@ -17,6 +17,7 @@ export type Tool =
   | 'crop'
   | 'polygon-mask'
   | 'wand-mask'
+  | 'knife'
 
 export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
 
@@ -140,6 +141,8 @@ export interface CanvasGuide {
   id: string
   axis: 'x' | 'y'
   position: number
+  slice?: boolean
+  artboardId?: string
 }
 
 export type View = 'editor' | 'home' | 'new'
