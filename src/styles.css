@@ -4949,3 +4949,11 @@ button:disabled {
 @media (max-width: 599px), (max-height: 560px) and (max-width: 1023px) {
   .numeric-stepper button, .quick-style .numeric-stepper button { width: 44px; min-width: 44px; }
 }
+.stroke-pattern-field, .quick-stroke-pattern { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 12px; }
+.stroke-pattern-field select, .quick-stroke-pattern select { min-height: 40px; padding: 0 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--surface-input); font: inherit; }
+.quick-stroke-pattern { flex: 0 0 auto; padding: 0 6px; white-space: nowrap; }
+.multi-actions { display: flex; align-items: center; gap: 6px; max-width: min(85vw, 950px); overflow-x: auto; }
+.multi-actions > span, .blend-count { white-space: nowrap; }
+.blend-count { display: flex; align-items: center; gap: 4px; }
+.blend-count .numeric-control { width: 112px; }
+.multi-mode-compact .quick-style { overflow-x: auto; max-width: calc(100vw - 20px); }

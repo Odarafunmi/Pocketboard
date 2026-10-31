@@ -1,3 +1,4 @@
+import * as polygonClipping from 'polygon-clipping'
 import {
   AlignCenter,
   AlignHorizontalJustifyCenter,
@@ -103,6 +104,7 @@ import { magicWandMask } from './selectionMask'
 import { downloadOnlineFont, ensureFont, ensureLayerFonts, fontFromBlob, getLocalFonts, listSavedFonts, saveFont, searchOnlineFonts, type LocalFont, type OnlineFont } from './fonts'
 import { presetShapePath, shapeCategories } from './shapePresets'
 import { NumericControl } from './NumericControl'
+import { nearestStrokePoint, strokePoint, variableStrokePath, widthAt } from './variableStroke'
 import type {
   ArtboardSnapshot,
   BlurType,
@@ -147,6 +149,7 @@ const DEFAULT_GRADIENT: GradientFill = {
 const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
+  compoundPolygons: layer.compoundPolygons?.map((polygon) => polygon.map((ring) => ring.map((point) => ({ ...point })))),
   penHandles: layer.penHandles?.map((point) => ({ ...point })),
   paintStrokes: layer.paintStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
   maskStrokes: layer.maskStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
@@ -229,6 +232,7 @@ function App() {
   })
   const [multiIds, setMultiIds] = useState<string[]>([])
   const [multiSelectMode, setMultiSelectMode] = useState(false)
+  const [blendSteps, setBlendSteps] = useState(5)
   const selectedIds = useMemo(() => selectedId && multiIds.includes(selectedId) ? multiIds : selectedId ? [selectedId] : [], [selectedId, multiIds])
   const [activeTool, setActiveTool] = useState<Tool>('select')
   const [editingTextId, setEditingTextId] = useState<string | null>(null)
@@ -621,7 +625,7 @@ function App() {
     const current = layersRef.current
     const selectedLayers = current.filter((layer) => selectedIds.includes(layer.id))
     const sameType = selectedLayers.every((layer) => layer.type === selectedLayers[0]?.type)
-    const allowed = new Set(['x', 'y', 'width', 'height', 'fill', 'fillType', 'gradient', 'stroke', 'strokeWidth', 'strokeEnabled', 'opacity', 'rotation', 'blendMode'])
+    const allowed = new Set(['x', 'y', 'width', 'height', 'fill', 'fillType', 'gradient', 'stroke', 'strokeWidth', 'strokeEnabled', 'strokeDash', 'opacity', 'rotation', 'blendMode'])
     if (sameType) ['fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'underline', 'textAlign', 'textWrap', 'letterSpacing', 'lineHeight', 'radius', 'sides'].forEach((key) => allowed.add(key))
     if (selectedIds.length < 2 || Object.keys(patch).some((key) => !allowed.has(key))) { updateLayer(selectedId, patch); return }
     const primary = current.find((layer) => layer.id === selectedId)
@@ -712,6 +716,37 @@ function App() {
     layersRef.current = next
     setLayers(next)
   }, [future])
+
+  const buildShapes = (operation: 'union' | 'difference' | 'intersection' | 'xor') => {
+    const current = layersRef.current
+    const chosen = current.filter((layer) => selectedIds.includes(layer.id))
+    if (chosen.length < 2) { showToast('Select at least two shapes.'); return }
+    if (chosen.some((layer) => current[current.indexOf(layer) + 1]?.clipToBelow && !selectedIds.includes(current[current.indexOf(layer) + 1].id))) { showToast('Release dependent clipping masks first.'); return }
+    try {
+      const geometries = chosen.map(booleanGeometry)
+      const api = ((polygonClipping as unknown as { default?: typeof polygonClipping }).default || polygonClipping)
+      const result = api[operation](geometries[0], ...geometries.slice(1))
+      if (!result.length) { showToast('The operation has no visible result.'); return }
+      const output = compoundLayer(result, chosen[0])
+      const index = current.indexOf(chosen[0])
+      const next = current.filter((layer) => !selectedIds.includes(layer.id))
+      next.splice(index, 0, output)
+      commitLayers(next, 'Shape created')
+      setMultiIds([]); selectedIdRef.current = output.id; setSelectedId(output.id); setMultiSelectMode(false); setMobileSheet(null)
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Could not build shapes.') }
+  }
+
+  const createBlend = () => {
+    const current = layersRef.current
+    const chosen = current.filter((layer) => selectedIds.includes(layer.id))
+    if (chosen.length !== 2) { showToast('Select exactly two shapes to blend.'); return }
+    try {
+      const generated = blendLayers(chosen[0], chosen[1], blendSteps)
+      const next = [...current]; next.splice(next.indexOf(chosen[1]), 0, ...generated)
+      commitLayers(next, `${generated.length} editable blend layers created`)
+      setMultiIds([]); selectedIdRef.current = generated[0].id; setSelectedId(generated[0].id); setMultiSelectMode(false); setMobileSheet(null)
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Could not blend shapes.') }
+  }
 
   const deleteSelected = useCallback(() => {
     if (!selectedId) return
@@ -1141,11 +1176,11 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
-  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
+  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife', 'width'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
   const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
   const showSelectionOptions = isCompact && !multiSelectMode && (activeTool === 'polygon-mask' || activeTool === 'wand-mask')
   const showMultiOptions = isCompact && multiSelectMode
-  const showKnifeOptions = isCompact && activeTool === 'knife'
+  const showKnifeOptions = isCompact && (activeTool === 'knife' || activeTool === 'width')
   const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
     if (action === 'select' || action === 'mask-done') {
@@ -1173,6 +1208,7 @@ function App() {
     else if (action === 'properties' || action === 'fill' || action === 'align' || action === 'arrange') setMobileSheet('properties')
     else if (action === 'edit-text' && selected) beginTextEditing(selected.id)
     else if (action === 'finish-text') finishTextEditing()
+    else if (action === 'width') { if (selected && supportsWidthTool(selected)) { setActiveTool('width'); setMobileSheet(null) } else showToast('Select an unlocked line or open path.') }
     else if (action === 'corners') setActiveTool('corner')
     else if (action === 'clip' && selected && !selected.locked && (selected.clipToBelow || layers.findIndex((layer) => layer.id === selected.id) > 0)) updateLayer(selected.id, { clipToBelow: !selected.clipToBelow })
     else if (action === 'duplicate') duplicateSelected()
@@ -1248,6 +1284,7 @@ function App() {
             else if (tool === 'paint-brush' && activeTool === 'brush') return
             else if (tool === 'brush') activateMaskBrush()
             else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
+            else if (tool === 'width' && (!selected || !supportsWidthTool(selected))) showToast('Select an unlocked line or open path.')
             else {
               finishTextEditing()
               if (tool === 'knife') setMultiSelectMode(false)
@@ -1317,7 +1354,7 @@ function App() {
             onAdd={addArtboard}
             onDelete={() => deleteArtboard()}
           />
-          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : undefined}><span>Tap layers to select</span><button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
+          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection actions"><span>{selectedIds.length} selected</span>{selectedIds.length >= 2 && <><button onClick={() => buildShapes('union')}>Unite</button><button title="Subtract upper selected shapes from the lowest" onClick={() => buildShapes('difference')}>Subtract</button><button onClick={() => buildShapes('intersection')}>Intersect</button><button onClick={() => buildShapes('xor')}>Exclude</button>{selectedIds.length === 2 && <><label className="blend-count">Steps <NumericControl label="Blend steps" min={1} max={50} step={1} value={blendSteps} onChange={(value) => setBlendSteps(Math.round(value))} /></label><button onClick={createBlend}>Create blend</button></>}</>}<button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
           {showQuickStyle && <QuickStyleToolbar
             layer={selected}
             onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
@@ -1384,6 +1421,7 @@ function App() {
             onSetZoom={(value) => setZoom(clamp(value, 5, 6400))}
             onUpdateGuide={(id, position) => setCanvasGuides((guides) => guides.map((guide) => guide.id === id ? { ...guide, position } : guide))}
             onDeleteGuide={(id) => setCanvasGuides((guides) => guides.filter((guide) => guide.id !== id))}
+            onUpdateWidth={(id, patch) => updateLayer(id, patch)}
             onUpdateLive={(id, patch) => updateLayer(id, patch, false)}
             onCommitSnapshot={(snapshot) => {
               setPast((items) => [...items.slice(-99), cloneLayers(snapshot)])
@@ -1580,6 +1618,7 @@ function App() {
                 else if (action === 'brush') { activateMaskBrush(); return }
                 else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null); return }
                 else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
+                else if (action === 'width') { if (selected && supportsWidthTool(selected)) setActiveTool('width'); else showToast('Select an unlocked line or open path.'); setMobileSheet(null); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner' || action === 'knife') { if (action === 'knife') setMultiSelectMode(false); setActiveTool(action) }
                 setMobileSheet(null)
               }}
@@ -1793,6 +1832,7 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'star', label: 'Star', icon: <Star /> },
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
+    { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'paint-brush', label: 'Brush', shortcut: 'B', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
@@ -2181,6 +2221,7 @@ interface CanvasProps {
   onSetZoom: (zoom: number) => void
   onUpdateGuide: (id: string, position: number) => void
   onDeleteGuide: (id: string) => void
+  onUpdateWidth: (id: string, patch: Partial<DesignLayer>) => void
   onUpdateLive: (id: string, patch: Partial<DesignLayer>) => void
   onCommitSnapshot: (layers: DesignLayer[]) => void
 }
@@ -2234,7 +2275,18 @@ function Canvas(props: CanvasProps) {
   const longPressPointerRef = useRef<number | null>(null)
   const longPressTriggeredRef = useRef(false)
   const cancelLongPressRef = useRef<(() => void) | null>(null)
+  const [widthPoint, setWidthPoint] = useState<number | null>(null)
+  useEffect(() => { setWidthPoint(null) }, [props.selected?.id, props.activeTool])
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
+  const alignmentRef = useRef('')
+  const announceAlignment = (guides: SmartGuideState) => {
+    const isArtboard = (value: number | undefined, size: number) => value !== undefined && [0, size / 2, size].some((target) => Math.abs(target - value) < 0.01)
+    const key = `${isArtboard(guides.x, props.documentMeta.width) ? guides.x : ''}:${isArtboard(guides.y, props.documentMeta.height) ? guides.y : ''}`
+    if (key !== ':' && key !== alignmentRef.current && typeof navigator.vibrate === 'function' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      try { navigator.vibrate(10) } catch { /* haptics are optional */ }
+    }
+    alignmentRef.current = key
+  }
   const [draftPoints, setDraftPoints] = useState<Point[]>([])
   const [isPinching, setIsPinching] = useState(false)
   const [wheelZooming, setWheelZooming] = useState(false)
@@ -2407,6 +2459,7 @@ function Canvas(props: CanvasProps) {
       }
     }))
     setSmartGuides(guides)
+    announceAlignment(guides)
     return { x: nextX, y: nextY }
   }
 
@@ -2519,6 +2572,20 @@ function Canvas(props: CanvasProps) {
     return { x: (x - layer.x) / Math.max(1, layer.width), y: (y - layer.y) / Math.max(1, layer.height) }
   }
 
+  const chooseWidthPoint = (point: Point) => {
+    const layer = props.selected
+    if (!layer || !supportsWidthTool(layer)) return
+    const normalized = normalizedSelectionPoint(point, layer)
+    const local = { x: layer.x + normalized.x * Math.max(1, layer.width), y: layer.y + normalized.y * Math.max(1, layer.height) }
+    const nearest = nearestStrokePoint(strokeCenterPath(layer), local)
+    if (!nearest) return
+    const rect = props.artboardRef.current?.getBoundingClientRect()
+    const tolerance = rect ? 30 * props.documentMeta.width / rect.width : 30
+    if (Math.hypot(nearest.point.x - local.x, nearest.point.y - local.y) > tolerance + Math.max(layer.strokeWidth, 2) / 2) { props.onSelectionError('Tap near the selected stroke.'); return }
+    const existing = (layer.widthPoints || []).find((item) => Math.abs(item.t - nearest.t) < .025)
+    setWidthPoint(existing?.t ?? nearest.t)
+  }
+
   const applyPolygonSelection = () => {
     const layer = props.selected
     if (!layer || layer.type !== 'image' || layer.locked || selectionPoints.length < 3) return
@@ -2547,7 +2614,7 @@ function Canvas(props: CanvasProps) {
     const selectionGesture = selectionGestureRef.current
     if (selectionGesture?.pointerId === event.pointerId) {
       selectionGestureRef.current = null
-      if (event.type === 'pointerup' && !pinchRef.current && Math.hypot(event.clientX - selectionGesture.x, event.clientY - selectionGesture.y) < 10) { const point = pointerToCanvas(event.clientX, event.clientY); if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? point.x : point.y); else selectAt(point) }
+      if (event.type === 'pointerup' && !pinchRef.current && Math.hypot(event.clientX - selectionGesture.x, event.clientY - selectionGesture.y) < 10) { const point = pointerToCanvas(event.clientX, event.clientY); if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? point.x : point.y); else if (props.activeTool === 'width') chooseWidthPoint(point); else selectAt(point) }
     }
     const gesture = pickGestureRef.current
     if (gesture?.pointerId === event.pointerId) {
@@ -2652,9 +2719,19 @@ function Canvas(props: CanvasProps) {
         const worldShiftY = shiftX * sin + shiftY * cos
         const originalCenterX = original.x + original.width / 2
         const originalCenterY = original.y + original.height / 2
+        const nextX = originalCenterX + worldShiftX - width / 2
+        const nextY = originalCenterY + worldShiftY - height / 2
+        if (state.moved && Math.abs(original.rotation % 360) < 0.01) {
+          const nearest = (values: number[], targets: number[], tolerance: number) => targets.find((target) => values.some((value) => Math.abs(value - target) <= tolerance))
+          const guides = {
+            x: nearest([nextX, nextX + width / 2, nextX + width], [0, props.documentMeta.width / 2, props.documentMeta.width], 6 * props.documentMeta.width / rect.width),
+            y: nearest([nextY, nextY + height / 2, nextY + height], [0, props.documentMeta.height / 2, props.documentMeta.height], 6 * props.documentMeta.height / rect.height),
+          }
+          setSmartGuides(guides); announceAlignment(guides)
+        }
         props.onUpdateLive(state.id, {
-          x: originalCenterX + worldShiftX - width / 2,
-          y: originalCenterY + worldShiftY - height / 2,
+          x: nextX,
+          y: nextY,
           width,
           height,
           ...(original.type === 'text' && !isCorner && (handle === 'e' || handle === 'w') ? { textWrap: true } : {}),
@@ -2698,6 +2775,7 @@ function Canvas(props: CanvasProps) {
         transformRef.current = null
       }
       setSmartGuides({})
+      alignmentRef.current = ''
       try {
         if (captureTarget.hasPointerCapture(pointerId)) captureTarget.releasePointerCapture(pointerId)
       } catch { /* the pointer may already be released */ }
@@ -3036,14 +3114,14 @@ function Canvas(props: CanvasProps) {
           ref={props.artboardRef}
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
-          role={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool) ? 'application' : 'img'}
-          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool) ? 0 : undefined}
-          aria-label={props.activeTool === 'knife' ? 'Knife tool. Use arrow keys to position a cut and Enter to add it.' : ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          role={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool) ? 'application' : 'img'}
+          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool) ? 0 : undefined}
+          aria-label={props.activeTool === 'width' ? 'Width tool. Use arrow keys to position the cursor and Enter to select a stroke point.' : props.activeTool === 'knife' ? 'Knife tool. Use arrow keys to position a cut and Enter to add it.' : ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
           onKeyDown={(event) => {
             const selectionActive = props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask'
-            if (!props.pickingColor && !selectionActive && props.activeTool !== 'knife') return
+            if (!props.pickingColor && !selectionActive && props.activeTool !== 'knife' && props.activeTool !== 'width') return
             const step = event.shiftKey ? 10 : 1
-            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? pickCursor.x : pickCursor.y); else props.onPickColor(pickCursor); return }
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? pickCursor.x : pickCursor.y); else if (props.activeTool === 'width') chooseWidthPoint(pickCursor); else props.onPickColor(pickCursor); return }
             if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
             event.preventDefault()
             event.stopPropagation()
@@ -3053,7 +3131,7 @@ function Canvas(props: CanvasProps) {
             }))
           }}
           onPointerDownCapture={(event) => {
-            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask' || props.activeTool === 'knife') {
+            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask' || props.activeTool === 'knife' || props.activeTool === 'width') {
               if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
               event.preventDefault(); event.stopPropagation()
               selectionGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
@@ -3082,13 +3160,14 @@ function Canvas(props: CanvasProps) {
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
           <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
-          {(props.pickingColor || ['polygon-mask', 'wand-mask', 'knife'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {(props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
             ? <line key={guide.id} className="user-guide guide-x" x1={guide.position} x2={guide.position} y1="0" y2={props.documentMeta.height} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />
             : <line key={guide.id} className="user-guide guide-y" y1={guide.position} y2={guide.position} x1="0" x2={props.documentMeta.width} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />)}
           {smartGuides.x !== undefined && <line className="smart-guide" x1={smartGuides.x} x2={smartGuides.x} y1="0" y2={props.documentMeta.height} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
           {smartGuides.y !== undefined && <line className="smart-guide" y1={smartGuides.y} y2={smartGuides.y} x1="0" x2={props.documentMeta.width} stroke={GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {props.activeTool === 'width' && props.selected && widthPoint !== null && (() => { const point = strokePoint(strokeCenterPath(props.selected!), widthPoint); return point ? <circle transform={layerTransform(props.selected!)} cx={point.x} cy={point.y} r={7 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="white" stroke={ACCENT} strokeWidth={2 / zoomRatio} vectorEffect="non-scaling-stroke" pointerEvents="none" /> : null })()}
           {props.activeTool === 'polygon-mask' && props.selected && selectionPoints.length > 0 && <g transform={layerTransform(props.selected)} pointerEvents="none">
             <polyline points={selectionPoints.map((point) => `${props.selected!.x + point.x * props.selected!.width},${props.selected!.y + point.y * props.selected!.height}`).join(' ')} fill="none" stroke={ACCENT} strokeWidth="2" strokeDasharray="5 4" vectorEffect="non-scaling-stroke" />
             {selectionPoints.map((point, index) => <circle key={index} cx={props.selected!.x + point.x * props.selected!.width} cy={props.selected!.y + point.y * props.selected!.height} r={5 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="white" stroke={ACCENT} vectorEffect="non-scaling-stroke" />)}
@@ -3125,6 +3204,7 @@ function Canvas(props: CanvasProps) {
       </div>
       </div>
     </div>
+    {props.activeTool === 'width' && props.selected && <div className="knife-controls width-controls" role="toolbar" aria-label="Width tool controls"><span>{widthPoint === null ? 'Tap a point on the stroke' : 'Adjust the selected point'}</span>{widthPoint !== null && <NumericControl label="Point width" min={0} max={1000} value={widthAt(props.selected.widthPoints || [], widthPoint, Math.max(props.selected.strokeWidth, 1))} onChange={(width) => { const layer = props.selected!; props.onUpdateWidth(layer.id, { widthPoints: [...(layer.widthPoints || []).filter((item) => Math.abs(item.t - widthPoint) > .001), { t: widthPoint, width }], strokeEnabled: true }) }} />}<button disabled={!props.selected.widthPoints?.length} onClick={() => { props.onUpdateWidth(props.selected!.id, { widthPoints: [] }); setWidthPoint(null) }}>Reset widths</button><button onClick={props.onKnifeDone}>Done</button></div>}
     {props.activeTool === 'knife' && <div className="knife-controls" role="toolbar" aria-label="Knife controls"><span>Tap canvas to add a cut</span><button aria-pressed={props.knifeAxis === 'x'} onClick={() => props.onKnifeAxis('x')}>Vertical</button><button aria-pressed={props.knifeAxis === 'y'} onClick={() => props.onKnifeAxis('y')}>Horizontal</button><button onClick={props.onKnifeDone}>Done</button></div>}
     {props.activeTool === 'pen' && !props.multiSelectMode && <div className={props.compactPenControls ? 'quick-style-wrap pen-actions compact' : 'pen-actions'} role="group" aria-label="Pen controls"><button aria-label="Straight pen" aria-pressed={penMode === 'straight'} onClick={() => setPenMode('straight')}>Straight</button><button aria-label="Curve pen" aria-pressed={penMode === 'curve'} onClick={() => setPenMode('curve')}>Curve</button><button disabled={draftPoints.length < 2} onClick={() => finishPenPath(false)}>Finish path</button><button disabled={!draftPoints.length} onClick={() => setPenDraft([], [])}>Cancel path</button></div>}
     {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className={`selection-tool-controls ${props.compactSelectionControls ? 'compact-selection-controls' : ''}`} role="toolbar" aria-label="Mask selection controls">
@@ -3182,6 +3262,11 @@ function layerFill(layer: DesignLayer) {
 
 function layerStroke(layer: DesignLayer) {
   return layer.strokeEnabled === false ? 'none' : layer.stroke
+}
+
+function strokeDashArray(layer: DesignLayer) {
+  const width = Math.max(layer.strokeWidth, 1)
+  return layer.strokeDash === 'dashed' ? `${width * 4} ${width * 2}` : layer.strokeDash === 'dotted' ? `0 ${width * 2}` : undefined
 }
 
 function maskStrokePoints(layer: DesignLayer, stroke: MaskBrushStroke) {
@@ -3303,11 +3388,11 @@ function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }
   if (layer.paintStrokes) {
     content = <g {...common}>{layer.paintStrokes.map((stroke, index) => <MaskStrokeElement key={index} layer={layer} stroke={stroke} paintColor={stroke.color} />)}</g>
   } else if (layer.type === 'rectangle') {
-    content = <rect {...common} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.radius || 0} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
+    content = <rect {...common} x={layer.x} y={layer.y} width={layer.width} height={layer.height} rx={layer.radius || 0} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeDasharray={strokeDashArray(layer)} strokeLinecap={layer.strokeDash === 'dotted' ? 'round' : undefined} />
   } else if (layer.type === 'ellipse') {
-    content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
+    content = <ellipse {...common} cx={cx} cy={cy} rx={layer.width / 2} ry={layer.height / 2} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeDasharray={strokeDashArray(layer)} strokeLinecap={layer.strokeDash === 'dotted' ? 'round' : undefined} />
   } else if (layer.type === 'polygon') {
-    content = <path {...common} d={polygonLayerPath(layer)} fillRule="evenodd" fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeLinejoin="round" />
+    content = <path {...common} d={polygonLayerPath(layer)} fillRule="evenodd" fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeDasharray={strokeDashArray(layer)} strokeLinecap={layer.strokeDash === 'dotted' ? 'round' : undefined} strokeLinejoin="round" />
   } else if (layer.type === 'image') {
     const scale = layer.imageScale || 1
     const imageWidth = layer.width * scale
@@ -3315,12 +3400,14 @@ function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }
     const imageX = layer.x - (imageWidth - layer.width) / 2 + (layer.imageOffsetX || 0)
     const imageY = layer.y - (imageHeight - layer.height) / 2 + (layer.imageOffsetY || 0)
     content = <image {...common} href={layer.src} x={imageX} y={imageY} width={imageWidth} height={imageHeight} preserveAspectRatio="xMidYMid slice" clipPath={`url(#clip-${layer.id})`} />
+  } else if (layer.widthPoints?.length && supportsWidthTool({ ...layer, locked: false }) && (layer.type === 'line' || layer.type === 'path' || layer.type === 'brush')) {
+    content = <path {...common} d={variableStrokePath(strokeCenterPath(layer), layer.widthPoints, Math.max(layer.strokeWidth, 1), layer.strokeDash)} fill={layerStroke(layer)} />
   } else if (layer.type === 'line') {
-    content = <line {...common} x1={layer.x} y1={layer.y} x2={layer.x + layer.width} y2={layer.y + layer.height} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 2)} strokeLinecap="round" />
+    content = <line {...common} x1={layer.x} y1={layer.y} x2={layer.x + layer.width} y2={layer.y + layer.height} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 2)} strokeDasharray={strokeDashArray(layer)} strokeLinecap="round" />
   } else if (layer.type === 'star') {
-    content = <polygon {...common} points={starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} />
+    content = <polygon {...common} points={starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)} fill={fill} stroke={layerStroke(layer)} strokeWidth={layer.strokeWidth} strokeDasharray={strokeDashArray(layer)} strokeLinecap={layer.strokeDash === 'dotted' ? 'round' : undefined} />
   } else if (layer.type === 'path' || layer.type === 'brush') {
-    content = <path {...common} d={designPath(layer)} fill={layer.closed ? fill : 'none'} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeLinecap="round" strokeLinejoin="round" />
+    content = <path {...common} d={designPath(layer)} fillRule="evenodd" fill={layer.closed ? fill : 'none'} stroke={layerStroke(layer)} strokeWidth={Math.max(layer.strokeWidth, 1)} strokeDasharray={strokeDashArray(layer)} strokeLinecap="round" strokeLinejoin="round" />
   } else {
     const lines = textLineDetails(layer)
     const fontSize = layer.fontSize || 32
@@ -3443,11 +3530,69 @@ function bezierPath(points: Point[], handles: Point[], closed: boolean) {
   return result + (closed ? ' Z' : '')
 }
 
+// Boolean results are stored as normalized, editable compound paths. Curves are
+// flattened in document space, so transforms and subsequent exports agree.
+function booleanGeometry(layer: DesignLayer): polygonClipping.MultiPolygon {
+  if (layer.locked || !layer.visible || layer.isEmpty || layer.maskStrokes?.length || layer.maskSelections?.length || layer.clipToBelow || layer.paintStrokes || layer.blur?.enabled || layer.width <= 0 || layer.height <= 0) throw new Error('Select visible, unlocked, unmasked shapes without effects.')
+  const cx = layer.x + layer.width / 2, cy = layer.y + layer.height / 2
+  const transform = (x: number, y: number): polygonClipping.Pair => {
+    const dx = (x - cx) * (layer.flipX ? -1 : 1), dy = (y - cy) * (layer.flipY ? -1 : 1), angle = layer.rotation * Math.PI / 180
+    return [cx + dx * Math.cos(angle) - dy * Math.sin(angle), cy + dx * Math.sin(angle) + dy * Math.cos(angle)]
+  }
+  if (layer.compoundPolygons) return layer.compoundPolygons.map((polygon) => polygon.map((ring) => ring.map((p) => transform(layer.x + p.x * layer.width, layer.y + p.y * layer.height))))
+  let data = ''
+  if (layer.type === 'rectangle') {
+    const {x,y,width:w,height:h} = layer, r = Math.min(Math.max(0, layer.radius || 0), w / 2, h / 2)
+    if (!r) return [[[[x,y],[x+w,y],[x+w,y+h],[x,y+h],[x,y]].map(([a,b]) => transform(a,b))]]
+    data = `M ${x+r} ${y} H ${x+w-r} Q ${x+w} ${y} ${x+w} ${y+r} V ${y+h-r} Q ${x+w} ${y+h} ${x+w-r} ${y+h} H ${x+r} Q ${x} ${y+h} ${x} ${y+h-r} V ${y+r} Q ${x} ${y} ${x+r} ${y} Z`
+  } else if (layer.type === 'ellipse') data = `M ${cx + layer.width / 2} ${cy} A ${layer.width / 2} ${layer.height / 2} 0 1 0 ${cx - layer.width / 2} ${cy} A ${layer.width / 2} ${layer.height / 2} 0 1 0 ${cx + layer.width / 2} ${cy} Z`
+  else if (layer.type === 'polygon') data = polygonLayerPath(layer)
+  else if (layer.type === 'star') data = `M ${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3).replace(/,/g, ' ')} Z`
+  else if (layer.type === 'path' && layer.closed) data = designPath(layer)
+  else throw new Error('Shape builder supports closed vector shapes only.')
+  if ((data.match(/[Mm]/g) || []).length !== 1) throw new Error('This complex preset is not supported by shape builder.')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', data)
+  const length = path.getTotalLength(); if (!length) throw new Error('A selected shape has no usable outline.')
+  const count = Math.max(100, Math.min(1500, Math.ceil(length / 2)))
+  const ring: polygonClipping.Ring = []
+  for (let i = 0; i < count; i++) { const p = path.getPointAtLength(length * i / count); ring.push(transform(p.x, p.y)) }
+  ring.push(ring[0]); return [[ring]]
+}
+
+function compoundLayer(geometry: polygonClipping.MultiPolygon, style: DesignLayer): DesignLayer {
+  const pairs = geometry.flat(2)
+  const xs = pairs.map((p) => p[0]), ys = pairs.map((p) => p[1])
+  const x = Math.min(...xs), y = Math.min(...ys), width = Math.max(...xs) - x, height = Math.max(...ys) - y
+  if (!width || !height || !Number.isFinite(width + height)) throw new Error('The operation has no visible result.')
+  return { id: makeId(), name: 'Shape builder result', type: 'path', x, y, width, height, rotation: 0, opacity: style.opacity, visible: true, locked: false, fill: style.fill, fillType: style.fillType, gradient: style.gradient, stroke: style.stroke, strokeEnabled: style.strokeEnabled, strokeWidth: style.strokeWidth, strokeDash: style.strokeDash, closed: true, compoundPolygons: geometry.map((polygon) => polygon.map((ring) => ring.map(([px,py]) => ({ x: (px-x)/width, y: (py-y)/height })))) }
+}
+
+function blendLayers(a: DesignLayer, b: DesignLayer, steps: number): DesignLayer[] {
+  const hex = (color: string) => /^#[0-9a-f]{3}$/i.test(color) ? '#' + [...color.slice(1)].map((c) => c + c).join('') : color
+  const valid = (l: DesignLayer) => !l.locked && l.visible && !l.isEmpty && !l.clipToBelow && !l.maskStrokes?.length && !l.maskSelections?.length && !l.blur?.enabled && !l.gradient && (l.fillType === undefined || l.fillType === 'solid') && ['rectangle', 'ellipse', 'polygon', 'star'].includes(l.type) && /^#[0-9a-f]{6}$/i.test(hex(l.fill)) && (l.stroke === 'transparent' || l.stroke === 'none' || /^#[0-9a-f]{6}$/i.test(hex(l.stroke)))
+  if (!valid(a) || !valid(b) || a.type !== b.type || a.shapeKind !== b.shapeKind || a.sides !== b.sides || Boolean(a.flipX) !== Boolean(b.flipX) || Boolean(a.flipY) !== Boolean(b.flipY) || (a.stroke === 'transparent' || a.stroke === 'none') !== (b.stroke === 'transparent' || b.stroke === 'none') || a.strokeEnabled !== b.strokeEnabled || a.strokeDash !== b.strokeDash) throw new Error('Blend requires two matching, unlocked solid-colour shapes without masks or effects.')
+  const mix = (x: number, y: number, t: number) => x + (y-x)*t
+  const color = (x: string, y: string, t: number) => '#' + [1,3,5].map((i) => Math.round(mix(parseInt(x.slice(i,i+2),16),parseInt(y.slice(i,i+2),16),t)).toString(16).padStart(2,'0')).join('')
+  return Array.from({ length: steps }, (_, i) => {
+    const t = (i+1)/(steps+1)
+    return { ...a, id: makeId(), name: `Blend ${i+1}`, x: mix(a.x,b.x,t), y: mix(a.y,b.y,t), width: mix(a.width,b.width,t), height: mix(a.height,b.height,t), rotation: mix(a.rotation,b.rotation,t), opacity: mix(a.opacity,b.opacity,t), fill: color(hex(a.fill),hex(b.fill),t), stroke: a.stroke === 'transparent' || a.stroke === 'none' ? a.stroke : color(hex(a.stroke),hex(b.stroke),t), strokeWidth: mix(a.strokeWidth,b.strokeWidth,t), radius: mix(a.radius || 0,b.radius || 0,t), burstInset: mix(a.burstInset ?? 45,b.burstInset ?? 45,t) }
+  })
+}
+
 function designPath(layer: DesignLayer) {
+  if (layer.compoundPolygons) return layer.compoundPolygons.flatMap((polygon) => polygon.map((ring) => pointPath(ring.map((p) => ({ x: layer.x + p.x * layer.width, y: layer.y + p.y * layer.height })), true))).join(' ')
   const points = layerPoints(layer)
   if (layer.type === 'brush') return smoothPath(points, layer.smoothing || .5)
   if (layer.penHandles) return bezierPath(points, layer.penHandles.map((handle) => ({ x: handle.x * layer.width, y: handle.y * layer.height })), Boolean(layer.closed))
   return pointPath(points, Boolean(layer.closed))
+}
+
+function supportsWidthTool(layer: DesignLayer) {
+  return !layer.locked && !layer.isEmpty && !layer.paintStrokes && (layer.type === 'line' || ((layer.type === 'path' || layer.type === 'brush') && !layer.closed))
+}
+
+function strokeCenterPath(layer: DesignLayer) {
+  return layer.type === 'line' ? `M ${layer.x} ${layer.y} L ${layer.x + layer.width} ${layer.y + layer.height}` : designPath(layer)
 }
 
 function pointPath(points: Point[], closed: boolean) {
@@ -4036,11 +4181,12 @@ function PropertiesPanel(props: PropertiesPanelProps) {
             <button type="button" aria-label="No stroke" aria-pressed={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none'} className={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none' ? 'selected' : ''} onClick={() => props.onUpdate({ strokeEnabled: false })}>None</button>
             <button type="button" aria-label="Solid stroke" aria-pressed={layer.strokeEnabled !== false && layer.stroke !== 'transparent' && layer.stroke !== 'none'} className={layer.strokeEnabled !== false && layer.stroke !== 'transparent' && layer.stroke !== 'none' ? 'selected' : ''} onClick={() => props.onUpdate({ strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 })}>Solid</button>
           </div>
+          <label className="stroke-pattern-field">Stroke pattern <select aria-label="Stroke pattern" value={layer.strokeDash || 'solid'} onChange={(event) => props.onUpdate({ strokeDash: event.target.value as 'solid' | 'dashed' | 'dotted', strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 })}><option value="solid">Solid</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option></select></label>
           <ColorInput onPickColor={props.onPickColor} label="Stroke" value={layer.stroke === 'transparent' ? '#18181B' : layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} />
           {props.imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={props.imagePalette.colors} value={layer.stroke} onChange={(stroke) => props.onUpdate({ stroke, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} /></>}
           {layer.type === 'brush'
             ? <><SliderField label="Brush size" value={layer.strokeWidth} min={1} max={120} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} /><SliderField label="Smoothing" value={round((layer.smoothing || .5) * 100)} min={0} max={100} unit="%" onChange={(value) => props.onUpdate({ smoothing: value / 100 })} /></>
-            : <NumberInput label="Width" min={0} value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth })} />}
+            : <NumberInput label="Width" min={0} value={layer.strokeWidth} unit="px" onChange={(strokeWidth) => props.onUpdate({ strokeWidth, ...(strokeWidth > 0 ? { strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke } : {}) })} />}
           {layer.type === 'rectangle' && <><NumberInput label="Corners" min={0} value={layer.radius || 0} unit="px" onChange={(radius) => props.onUpdate({ radius })} /><button className={`button secondary full-button ${props.activeTool === 'corner' ? 'active' : ''}`} onClick={() => props.onActivateTool('corner')}><Spline size={15} /> Edit corners on canvas</button></>}
         </PropertySection>
       )}
@@ -4343,6 +4489,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
         <span className="quick-style-divider" />
         <label className="quick-style-colour">Stroke <input type="color" aria-label="Shape stroke colour" value={normalizeColor(layer.stroke)} onChange={(event) => onUpdate({ stroke: event.target.value, strokeEnabled: true, strokeWidth: layer.strokeWidth || 1 })} /></label>
         <button className="quick-style-text" aria-label="No stroke" aria-pressed={layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none'} onClick={() => onUpdate(layer.strokeEnabled === false || layer.stroke === 'transparent' || layer.stroke === 'none' ? { strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 } : { strokeEnabled: false })}>No stroke</button>
+        <label className="quick-stroke-pattern">Pattern <select aria-label="Stroke pattern" value={layer.strokeDash || 'solid'} onChange={(event) => onUpdate({ strokeDash: event.target.value as 'solid' | 'dashed' | 'dotted', strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke, strokeWidth: layer.strokeWidth || 1 })}><option value="solid">Solid</option><option value="dashed">Dashed</option><option value="dotted">Dotted</option></select></label>
         <QuickStyleNumber label="Stroke width" value={layer.strokeWidth} min={0} max={1000} onChange={(strokeWidth) => onUpdate({ strokeWidth, strokeEnabled: true, stroke: layer.stroke === 'transparent' || layer.stroke === 'none' ? '#18181B' : layer.stroke })} />
         <span className="quick-style-divider" />
       </>}
@@ -4366,7 +4513,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
 type MobileToolAction =
   | 'select' | 'object-select' | 'mask-brush' | 'paint-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
   | 'properties' | 'fill' | 'clip' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
-  | 'polygon-mask' | 'wand-mask'
+  | 'polygon-mask' | 'wand-mask' | 'width'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
 function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMode, quickStyleAction, onAction }: {
@@ -4431,6 +4578,7 @@ function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMo
         ...(activeTool === 'corner' ? [{ label: 'Done', icon: <Check />, action: 'mask-done' as MobileToolAction, active: true }] : []),
         { label: 'Edit', icon: <SlidersHorizontal />, action: 'properties' },
         { label: 'Fill', icon: <Palette />, action: 'fill' },
+        ...(supportsWidthTool(selected) ? [{ label: 'Width', icon: <SlidersHorizontal />, action: 'width' as MobileToolAction, active: activeTool === 'width' }] : []),
         ...(supportsCorners ? [{ label: 'Corners', icon: <Spline />, action: 'corners' as MobileToolAction, active: activeTool === 'corner' }] : []),
         { label: 'Align', icon: <AlignCenter />, action: 'align' },
         { label: 'Arrange', icon: <Layers3 />, action: 'arrange' },
@@ -4664,6 +4812,7 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'paint-brush', label: 'Brush', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
+    { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
@@ -4784,6 +4933,8 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   { title: 'Layers and multiple selection', keywords: 'layers order arrange lock visibility duplicate clip group assets', paragraphs: [
     'Open Layers from the bottom toolbar on a phone or the left panel on desktop. A normal tap or click selects one layer. Drag layer rows to reorder; use the visibility and lock controls to hide or protect a layer. The plus button creates an empty layer, and Assets contains built-in shapes.',
     'Long-press a layer on a phone or right-click it on desktop to start multiple selection, then select more rows. Choose Done selecting to exit. Desktop modifier selection also works on the canvas. Use the available group controls for common operations.',
+    'With multiple shapes selected, Unite, Subtract, Intersect and Exclude create a compound path. Subtract removes upper selected shapes from the lowest selected shape. Curves are approximated, and the operation replaces its inputs; Undo restores them.',
+    'For a blend, select two matching solid-colour shapes, set Steps and choose Create blend. The intermediate shapes are separate editable layers; editing an endpoint does not regenerate them. Masks, effects, images and text are not supported by this blend.',
     'Select Clip to clip an object to the layer directly below it. Reordering changes which layer is below. Duplicate, delete, alignment and arrangement controls are available in the layer or object actions.'
   ] },
   { title: 'Text and fonts', keywords: 'type edit typography alignment bold italic justify install font', paragraphs: [
@@ -4791,7 +4942,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
     'Use Style for the quick toolbar above the bottom toolbar: alignment, size and basic formatting. Scroll the toolbar for more controls and choose More for detailed properties, colours, fonts and spacing. Font import and available font search are in the font controls.'
   ] },
   { title: 'Shapes, colour and effects', keywords: 'rectangle ellipse polygon star fill stroke opacity gradient blur palette', paragraphs: [
-    'Choose Shapes on a phone or a shape tool on desktop. The Assets panel offers more built-in shapes. Select a shape and use Edit or Fill for its quick toolbar, including fill, stroke and opacity. More opens detailed settings such as gradients.',
+    'Choose Shapes on a phone or a shape tool on desktop. The Assets panel offers more built-in shapes. Select a shape and use Edit or Fill for its quick toolbar. Choose No fill and set a stroke colour and width independently; choose Solid, Dashed or Dotted under Pattern. More opens detailed settings such as gradients.',
     'Use colour controls to choose a colour or sample one from the canvas. Properties also provide alignment, blend and blur effects where supported. Image palette extracts colours from a selected image.'
   ] },
   { title: 'Images, crop and masks', keywords: 'image import photo crop mask brush clipping polygon magic wand feather tolerance', paragraphs: [
@@ -4801,11 +4952,12 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   ] },
   { title: 'Brush and pen', keywords: 'paint draw strokes hardness soft hard pen bezier curve straight', paragraphs: [
     'Brush paints the foreground colour when no mask is being edited. Set foreground and background colours, size, hardness, opacity and flow in the brush controls. Soft and Hard are hardness presets.',
+    'Select an unlocked line or open pen path, choose Width and tap the stroke to adjust its width at that point. Add more points or choose Reset widths. Curves and patterns are approximated; closed shapes and painted brush layers are not supported.',
     'The Pen tool offers Straight and Curve modes. Tap to place straight points or drag anchors to create curves; select Finish path or tap the first point to close a shape. Finished path handles cannot currently be edited.'
   ] },
   { title: 'Grid, rulers and guides', keywords: 'grid guides snapping layout size ruler clear move', paragraphs: [
     'Open Design settings → Canvas to toggle Layout grid or Rulers and guides. Adjust grid spacing, add vertical or horizontal guides, and drag guides to reposition them. Clear guides removes the current guides.',
-    'Carousel divisions and Knife cuts are special guides used by carousel export; ordinary grid lines and ordinary guides are not export cuts. Guides do not appear in exported images.'
+    'Carousel divisions and Knife cuts are special guides used by carousel export; ordinary grid lines and ordinary guides are not export cuts. Guides do not appear in exported images. Moving or resizing near an artboard edge or centre shows a smart guide and may provide a short vibration on supported devices.'
   ] },
   { title: 'Export, share and shortcuts', keywords: 'download png jpeg jpg svg pdf project keyboard save undo', paragraphs: [
     'Export offers PNG, JPG, SVG, PDF and Project. Set the file name and available format options before exporting. PNG supports a transparent background; JPG has a quality control. Carousel ZIP export is available for PNG and JPG.',
@@ -5154,6 +5306,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const opacity = layer.opacity
     const fill = layerFill(layer)
     const stroke = layerStroke(layer)
+    const dash = strokeDashArray(layer) ? ` stroke-dasharray="${strokeDashArray(layer)}"${layer.strokeDash === 'dotted' && layer.type !== 'line' && layer.type !== 'path' && layer.type !== 'brush' ? ' stroke-linecap="round"' : ''}` : ''
     const wrap = (element: string) => {
       const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
       const samples = blurSamples(layer)
@@ -5161,9 +5314,9 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
     }
     if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke, index) => maskStrokeSvg(layer, stroke, `soft-paint-${escapeXml(layer.id)}-${index}`, stroke.color)).join('')}</g>`)
-    if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
-    if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
-    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" stroke-linejoin="round" opacity="${opacity}"/>`)
+    if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} opacity="${opacity}"/>`)
+    if (layer.type === 'ellipse') return wrap(`<ellipse cx="${cx}" cy="${cy}" rx="${layer.width / 2}" ry="${layer.height / 2}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} opacity="${opacity}"/>`)
+    if (layer.type === 'polygon') return wrap(`<path d="${polygonLayerPath(layer)}" fill-rule="evenodd" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} stroke-linejoin="round" opacity="${opacity}"/>`)
     if (layer.type === 'image') {
       const scale = layer.imageScale || 1
       const width = layer.width * scale
@@ -5172,11 +5325,12 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const y = layer.y - (height - layer.height) / 2 + (layer.imageOffsetY || 0)
       return wrap(`<image href="${escapeXml(layer.src || '')}" x="${x}" y="${y}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid slice" clip-path="url(#clip-${layer.id})" opacity="${opacity}"/>`)
     }
-    if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}" stroke-linecap="round" opacity="${opacity}"/>`)
-    if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}" opacity="${opacity}"/>`)
+    if (layer.widthPoints?.length && supportsWidthTool({ ...layer, locked: false }) && (layer.type === 'line' || layer.type === 'path' || layer.type === 'brush')) return wrap(`<path d="${variableStrokePath(strokeCenterPath(layer), layer.widthPoints, Math.max(layer.strokeWidth, 1), layer.strokeDash)}" fill="${stroke}" opacity="${opacity}"/>`)
+    if (layer.type === 'line') return wrap(`<line x1="${layer.x}" y1="${layer.y}" x2="${layer.x + layer.width}" y2="${layer.y + layer.height}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 2)}"${dash} stroke-linecap="round" opacity="${opacity}"/>`)
+    if (layer.type === 'star') return wrap(`<polygon points="${starPoints(cx, cy, Math.min(layer.width, layer.height) / 2, Math.min(layer.width, layer.height) / 4.3)}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} opacity="${opacity}"/>`)
     if (layer.type === 'path' || layer.type === 'brush') {
       const data = designPath(layer)
-      return wrap(`<path d="${data}" fill="${layer.closed ? fill : 'none'}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}" stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
+      return wrap(`<path d="${data}" fill-rule="evenodd" fill="${layer.closed ? fill : 'none'}" stroke="${stroke}" stroke-width="${Math.max(layer.strokeWidth, 1)}"${dash} stroke-linecap="round" stroke-linejoin="round" opacity="${opacity}"/>`)
     }
     const fontSize = layer.fontSize || 32
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x

@@ -101,3 +101,19 @@ EPS and non-PDF-compatible AI files are not supported. Convert them to SVG or PN
 ### Numeric controls
 
 Type signed values in numeric fields where meaningful, then press Enter or leave the field to apply them. Use the increase and decrease buttons or keyboard arrow keys for precise changes. Hold an adjustment button with a mouse or touch to repeat until release. Fields with a fixed valid range, including opacity, dimensions, brush strength and slide counts, are limited to that range.
+
+### Shape strokes and alignment feedback
+
+For an outlined shape, select it, choose **No fill**, and set a stroke colour and width independently. **Stroke pattern** offers solid, dashed and dotted strokes in both the quick toolbar and detailed properties. Patterns are preserved in SVG and raster exports.
+
+Moving an object to an artboard edge or centre shows a smart guide; resizing near those positions also shows a guide. A short vibration is requested when entering an artboard alignment on supported devices, unless reduced motion is enabled. Browsers and devices that do not support vibration still show the visual guide.
+
+### Variable stroke widths
+
+Select an unlocked line or open pen/brush path and choose **Width**. Tap a point on its stroke, then set **Point width**; add more points to vary the width along the path. **Reset widths** restores the ordinary stroke. The points are saved with the layer, and SVG and raster exports include the resulting outline. Widths on curved or patterned strokes are approximated by sampled geometry; closed shapes and painted brush layers are not supported.
+
+### Shape operations and editable blends
+
+Start multiple selection by long-pressing a layer on a phone or right-clicking a layer on desktop, then select additional layers. Close the Layers sheet on a phone to reach the horizontally scrolling selection toolbar. **Unite**, **Subtract**, **Intersect** and **Exclude** replace selected shapes with a compound vector path; Subtract removes the upper selected shapes from the lowest one. The result uses the lowest shape's style and can be transformed and styled as a layer. Undo restores the original layers. Closed vector shapes are supported; masks, clipping, effects, and complex multi-contour presets are not. Curved outlines are sampled, so results are approximations. Individual vertices and Illustrator-style drag-across-region selection are not yet available.
+
+Select exactly two matching solid-colour rectangles, ellipses, polygons or stars, set **Steps** and choose **Create blend**. Intermediate shapes become independent layers that can be edited, reordered, exported and undone; the two source layers remain. The generated layers do not update automatically when a source changes. Both shapes must have compatible type, preset, sides, flip and stroke settings; images, text, gradients, masks and effects are not supported.

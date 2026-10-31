@@ -18,6 +18,7 @@ export type Tool =
   | 'polygon-mask'
   | 'wand-mask'
   | 'knife'
+  | 'width'
 
 export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
 
@@ -83,11 +84,14 @@ export interface DesignLayer {
   stroke: string
   strokeWidth: number
   strokeEnabled?: boolean
+  strokeDash?: 'solid' | 'dashed' | 'dotted'
+  widthPoints?: { t: number; width: number }[]
   radius?: number
   sides?: number
   shapeKind?: ShapeKind
   burstInset?: number
   points?: Point[]
+  compoundPolygons?: Point[][][]
   isEmpty?: boolean
   paintStrokes?: (MaskBrushStroke & { color: string })[]
   penHandles?: Point[]
