@@ -233,6 +233,7 @@ function App() {
   const [multiIds, setMultiIds] = useState<string[]>([])
   const [multiSelectMode, setMultiSelectMode] = useState(false)
   const [blendSteps, setBlendSteps] = useState(5)
+  const [builder, setBuilder] = useState<BuilderSession | null>(null)
   const selectedIds = useMemo(() => selectedId && multiIds.includes(selectedId) ? multiIds : selectedId ? [selectedId] : [], [selectedId, multiIds])
   const [activeTool, setActiveTool] = useState<Tool>('select')
   const [editingTextId, setEditingTextId] = useState<string | null>(null)
@@ -736,6 +737,53 @@ function App() {
     } catch (error) { showToast(error instanceof Error ? error.message : 'Could not build shapes.') }
   }
 
+  const startShapeBuilder = () => {
+    const current = layersRef.current
+    const chosen = current.filter((layer) => selectedIds.includes(layer.id))
+    if (chosen.length < 2) { showToast('Select at least two shapes first.'); return }
+    const first = current.indexOf(chosen[0]), last = current.indexOf(chosen[chosen.length - 1])
+    if (current.slice(first, last + 1).some((layer) => !selectedIds.includes(layer.id)) || current[last + 1]?.clipToBelow) { showToast('Select adjacent layers and release dependent clipping masks first.'); return }
+    if (chosen.some((layer) => ['linear', 'radial', 'none'].includes(layer.fillType || 'solid') || layer.fill === 'transparent' || layer.fill === 'none' || layer.opacity !== 1 || (layer.blendMode && layer.blendMode !== 'normal'))) { showToast('Shape builder requires opaque, solid-filled shapes without blend effects.'); return }
+    try {
+      const regions = partitionBuilderRegions(chosen)
+      if (!regions.length) throw new Error('The selected shapes have no regions.')
+      setBuilder({ sources: cloneLayers(chosen), regions, selected: [], mode: 'merge' })
+      finishTextEditing(); setMultiSelectMode(false); setMobileSheet(null); setActiveTool('shape-builder')
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Could not prepare shape regions.') }
+  }
+
+  const finishShapeBuilder = (apply: boolean) => {
+    if (!builder) return
+    if (!apply) { setBuilder(null); setActiveTool('select'); return }
+    if (!builder.selected.length) { showToast('Drag across at least one region.'); return }
+    const current = layersRef.current
+    const sources = builder.sources.map((source) => current.find((layer) => layer.id === source.id))
+    if (sources.some((source, index) => !source || JSON.stringify(source) !== JSON.stringify(builder.sources[index]))) { showToast('The source layers changed. Start shape builder again.'); setBuilder(null); setActiveTool('select'); return }
+    const sourceIdsAtApply = new Set(builder.sources.map((layer) => layer.id))
+    const positions = current.map((layer, index) => sourceIdsAtApply.has(layer.id) ? index : -1).filter((index) => index >= 0)
+    const firstPosition = positions[0], lastPosition = positions[positions.length - 1]
+    if (positions.length !== builder.sources.length || lastPosition - firstPosition + 1 !== positions.length || current[lastPosition + 1]?.clipToBelow) { showToast('Layer order or clipping changed. Start shape builder again.'); setBuilder(null); setActiveTool('select'); return }
+    try {
+      const api = polygonApi()
+      const selected = new Set(builder.selected)
+      const remaining = builder.regions.filter((_, index) => !selected.has(index)).map((region) => compoundLayer([region.geometry], builder.sources[region.styleIndex]))
+      let merged: DesignLayer | undefined
+      if (builder.mode === 'merge') {
+        const first = builder.regions[builder.selected[0]]
+        const geometry = api.union(...builder.selected.map((index) => [builder.regions[index].geometry]) as [polygonClipping.MultiPolygon, ...polygonClipping.MultiPolygon[]])
+        merged = compoundLayer(geometry, builder.sources[first.styleIndex])
+        merged.name = 'Merged regions'
+      }
+      const inserted = [...remaining, ...(merged ? [merged] : [])]
+      const sourceIds = new Set(builder.sources.map((layer) => layer.id))
+      const index = current.findIndex((layer) => sourceIds.has(layer.id))
+      const next = current.filter((layer) => !sourceIds.has(layer.id)); next.splice(index, 0, ...inserted)
+      commitLayers(next, builder.mode === 'merge' ? 'Regions merged' : 'Regions removed')
+      const id = merged?.id || remaining[0]?.id || null
+      selectedIdRef.current = id; setSelectedId(id); setMultiIds([]); setBuilder(null); setActiveTool('select')
+    } catch (error) { showToast(error instanceof Error ? error.message : 'Could not build selected regions.') }
+  }
+
   const createBlend = () => {
     const current = layersRef.current
     const chosen = current.filter((layer) => selectedIds.includes(layer.id))
@@ -1176,11 +1224,11 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
-  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife', 'width'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
+  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
   const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
   const showSelectionOptions = isCompact && !multiSelectMode && (activeTool === 'polygon-mask' || activeTool === 'wand-mask')
   const showMultiOptions = isCompact && multiSelectMode
-  const showKnifeOptions = isCompact && (activeTool === 'knife' || activeTool === 'width')
+  const showKnifeOptions = isCompact && (activeTool === 'knife' || activeTool === 'width' || activeTool === 'shape-builder')
   const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
     if (action === 'select' || action === 'mask-done') {
@@ -1284,6 +1332,7 @@ function App() {
             else if (tool === 'paint-brush' && activeTool === 'brush') return
             else if (tool === 'brush') activateMaskBrush()
             else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
+            else if (tool === 'shape-builder') startShapeBuilder()
             else if (tool === 'width' && (!selected || !supportsWidthTool(selected))) showToast('Select an unlocked line or open path.')
             else {
               finishTextEditing()
@@ -1354,7 +1403,7 @@ function App() {
             onAdd={addArtboard}
             onDelete={() => deleteArtboard()}
           />
-          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection actions"><span>{selectedIds.length} selected</span>{selectedIds.length >= 2 && <><button onClick={() => buildShapes('union')}>Unite</button><button title="Subtract upper selected shapes from the lowest" onClick={() => buildShapes('difference')}>Subtract</button><button onClick={() => buildShapes('intersection')}>Intersect</button><button onClick={() => buildShapes('xor')}>Exclude</button>{selectedIds.length === 2 && <><label className="blend-count">Steps <NumericControl label="Blend steps" min={1} max={50} step={1} value={blendSteps} onChange={(value) => setBlendSteps(Math.round(value))} /></label><button onClick={createBlend}>Create blend</button></>}</>}<button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
+          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection actions"><span>{selectedIds.length} selected</span>{selectedIds.length >= 2 && <><button onClick={startShapeBuilder}>Shape builder</button><button onClick={() => buildShapes('union')}>Unite</button><button title="Subtract upper selected shapes from the lowest" onClick={() => buildShapes('difference')}>Subtract</button><button onClick={() => buildShapes('intersection')}>Intersect</button><button onClick={() => buildShapes('xor')}>Exclude</button>{selectedIds.length === 2 && <><label className="blend-count">Steps <NumericControl label="Blend steps" min={1} max={50} step={1} value={blendSteps} onChange={(value) => setBlendSteps(Math.round(value))} /></label><button onClick={createBlend}>Create blend</button></>}</>}<button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
           {showQuickStyle && <QuickStyleToolbar
             layer={selected}
             onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
@@ -1380,6 +1429,11 @@ function App() {
             selected={selected}
             selectedIds={selectedIds}
             multiSelectMode={multiSelectMode}
+            builder={activeTool === 'shape-builder' ? builder : null}
+            onBuilderSelect={(indices, toggle) => setBuilder((current) => current ? { ...current, selected: toggle ? current.selected.includes(indices[0]) ? current.selected.filter((id) => id !== indices[0]) : [...current.selected, indices[0]] : [...new Set([...current.selected, ...indices])] } : current)}
+            onBuilderMode={(mode) => setBuilder((current) => current ? { ...current, mode } : current)}
+            onBuilderClear={() => setBuilder((current) => current ? { ...current, selected: [] } : current)}
+            onBuilderFinish={finishShapeBuilder}
             onToggleMulti={toggleMultiSelection}
             compactPenControls={showPenOptions}
             onMoveSelectionLive={(snapshot, ids, dx, dy) => { const next = snapshot.map((layer) => ids.includes(layer.id) && !layer.locked ? { ...layer, x: layer.x + dx, y: layer.y + dy } : layer); layersRef.current = next; setLayers(next) }}
@@ -1619,6 +1673,7 @@ function App() {
                 else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null); return }
                 else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
                 else if (action === 'width') { if (selected && supportsWidthTool(selected)) setActiveTool('width'); else showToast('Select an unlocked line or open path.'); setMobileSheet(null); return }
+                else if (action === 'shape-builder') { setMobileSheet(null); startShapeBuilder(); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner' || action === 'knife') { if (action === 'knife') setMultiSelectMode(false); setActiveTool(action) }
                 setMobileSheet(null)
               }}
@@ -1833,6 +1888,7 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'line', label: 'Line', shortcut: 'L', icon: <Minus /> },
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
+    { id: 'shape-builder', label: 'Shape builder', icon: <Shapes /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'paint-brush', label: 'Brush', shortcut: 'B', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
@@ -2166,6 +2222,9 @@ function LayerThumbnail({ layer }: { layer: DesignLayer }) {
   return <span className={`layer-thumbnail color ${layer.fillType === 'none' ? 'no-fill-swatch' : ''}`} style={{ background: layer.fillType === 'none' ? undefined : layer.fill }} />
 }
 
+type BuilderRegion = { geometry: polygonClipping.Polygon; styleIndex: number }
+type BuilderSession = { sources: DesignLayer[]; regions: BuilderRegion[]; selected: number[]; mode: 'merge' | 'remove' }
+
 interface CanvasProps {
   quickStyleOpen: boolean
   artboardRef: React.RefObject<SVGSVGElement>
@@ -2174,6 +2233,11 @@ interface CanvasProps {
   selected: DesignLayer | null
   selectedIds: string[]
   multiSelectMode: boolean
+  builder: BuilderSession | null
+  onBuilderSelect: (indices: number[], toggle?: boolean) => void
+  onBuilderMode: (mode: 'merge' | 'remove') => void
+  onBuilderClear: () => void
+  onBuilderFinish: (apply: boolean) => void
   onToggleMulti: (id: string) => void
   compactPenControls: boolean
   compactSelectionControls: boolean
@@ -2275,6 +2339,8 @@ function Canvas(props: CanvasProps) {
   const longPressPointerRef = useRef<number | null>(null)
   const longPressTriggeredRef = useRef(false)
   const cancelLongPressRef = useRef<(() => void) | null>(null)
+  const builderGestureRef = useRef<{ pointerId: number; last: Point; hits: Set<number> } | null>(null)
+  const [builderPreview, setBuilderPreview] = useState<number[]>([])
   const [widthPoint, setWidthPoint] = useState<number | null>(null)
   useEffect(() => { setWidthPoint(null) }, [props.selected?.id, props.activeTool])
   const [smartGuides, setSmartGuides] = useState<SmartGuideState>({})
@@ -2505,6 +2571,7 @@ function Canvas(props: CanvasProps) {
     if (pointers.size < 2 || pinchRef.current) return
     pickGestureRef.current = null
     selectionGestureRef.current = null
+    builderGestureRef.current = null; setBuilderPreview([])
     const entries = [...pointers.entries()].slice(0, 2) as [[number, Point], [number, Point]]
     const [[firstId, first], [secondId, second]] = entries
     const svg = props.artboardRef.current
@@ -2534,6 +2601,13 @@ function Canvas(props: CanvasProps) {
   }
 
   const onCanvasPointerMoveCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const builderGesture = builderGestureRef.current
+    if (builderGesture && builderGesture.pointerId === event.pointerId && props.builder && !pinchRef.current) {
+      const point = pointerToCanvas(event.clientX, event.clientY)
+      props.builder.regions.forEach((region, index) => { if (builderSegmentHits(builderGesture.last, point, region.geometry)) builderGesture.hits.add(index) })
+      builderGesture.last = point
+      setBuilderPreview([...builderGesture.hits]); event.preventDefault()
+    }
     if (event.pointerType !== 'touch' || !touchPointersRef.current.has(event.pointerId)) return
     touchPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
     const pinch = pinchRef.current
@@ -2611,6 +2685,15 @@ function Canvas(props: CanvasProps) {
   }
 
   const finishCanvasPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const builderGesture = builderGestureRef.current
+    if (builderGesture?.pointerId === event.pointerId) {
+      if (event.type === 'pointerup' && !pinchRef.current) {
+        const point = pointerToCanvas(event.clientX, event.clientY)
+        props.builder?.regions.forEach((region, index) => { if (builderSegmentHits(builderGesture.last, point, region.geometry)) builderGesture.hits.add(index) })
+        if (builderGesture.hits.size) props.onBuilderSelect([...builderGesture.hits])
+      }
+      builderGestureRef.current = null; setBuilderPreview([])
+    }
     const selectionGesture = selectionGestureRef.current
     if (selectionGesture?.pointerId === event.pointerId) {
       selectionGestureRef.current = null
@@ -3114,14 +3197,15 @@ function Canvas(props: CanvasProps) {
           ref={props.artboardRef}
           className="artboard"
           viewBox={`0 0 ${props.documentMeta.width} ${props.documentMeta.height}`}
-          role={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool) ? 'application' : 'img'}
-          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool) ? 0 : undefined}
-          aria-label={props.activeTool === 'width' ? 'Width tool. Use arrow keys to position the cursor and Enter to select a stroke point.' : props.activeTool === 'knife' ? 'Knife tool. Use arrow keys to position a cut and Enter to add it.' : ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
+          role={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(props.activeTool) ? 'application' : 'img'}
+          tabIndex={props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(props.activeTool) ? 0 : undefined}
+          aria-label={props.activeTool === 'shape-builder' ? 'Shape builder. Use arrow keys to move the cursor, Enter to toggle a region, and Apply to finish.' : props.activeTool === 'width' ? 'Width tool. Use arrow keys to position the cursor and Enter to select a stroke point.' : props.activeTool === 'knife' ? 'Knife tool. Use arrow keys to position a cut and Enter to add it.' : ['polygon-mask', 'wand-mask'].includes(props.activeTool) ? 'Mask selection. Use arrow keys to move the cursor and Enter to select.' : props.pickingColor ? 'Colour picker. Use arrow keys to move and Enter to pick. Press Escape to cancel.' : `Artboard, ${props.documentMeta.width} by ${props.documentMeta.height} pixels. Long-press to manage artboards.`}
           onKeyDown={(event) => {
             const selectionActive = props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask'
-            if (!props.pickingColor && !selectionActive && props.activeTool !== 'knife' && props.activeTool !== 'width') return
+            if (props.activeTool === 'shape-builder' && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); props.onBuilderFinish(false); return }
+            if (!props.pickingColor && !selectionActive && props.activeTool !== 'knife' && props.activeTool !== 'width' && props.activeTool !== 'shape-builder') return
             const step = event.shiftKey ? 10 : 1
-            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (selectionActive) selectAt(pickCursor); else if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? pickCursor.x : pickCursor.y); else if (props.activeTool === 'width') chooseWidthPoint(pickCursor); else props.onPickColor(pickCursor); return }
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); if (props.activeTool === 'shape-builder') { const index = props.builder?.regions.findIndex((region) => pointInBuilderRegion(pickCursor, region.geometry)) ?? -1; if (index >= 0) props.onBuilderSelect([index], true) } else if (selectionActive) selectAt(pickCursor); else if (props.activeTool === 'knife') props.onSlice(props.knifeAxis === 'x' ? pickCursor.x : pickCursor.y); else if (props.activeTool === 'width') chooseWidthPoint(pickCursor); else props.onPickColor(pickCursor); return }
             if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return
             event.preventDefault()
             event.stopPropagation()
@@ -3131,7 +3215,17 @@ function Canvas(props: CanvasProps) {
             }))
           }}
           onPointerDownCapture={(event) => {
-            if (props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask' || props.activeTool === 'knife' || props.activeTool === 'width') {
+            if (props.activeTool === 'shape-builder' && props.builder) {
+              if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
+              const point = pointerToCanvas(event.clientX, event.clientY)
+              const hits = new Set<number>()
+              props.builder.regions.forEach((region, index) => { if (pointInBuilderRegion(point, region.geometry)) hits.add(index) })
+              builderGestureRef.current = { pointerId: event.pointerId, last: point, hits }
+              setBuilderPreview([...hits]); event.preventDefault(); event.stopPropagation()
+              try { scrollRef.current?.setPointerCapture(event.pointerId) } catch { /* best effort */ }
+              return
+            }
+            if (props.activeTool === 'polygon-mask'  || props.activeTool === 'wand-mask' || props.activeTool === 'knife' || props.activeTool === 'width') {
               if (pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
               event.preventDefault(); event.stopPropagation()
               selectionGestureRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY }
@@ -3160,7 +3254,11 @@ function Canvas(props: CanvasProps) {
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
           <g clipPath="url(#artboard-inside)">{renderLayers()}</g>
-          {(props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {(props.pickingColor || ['polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(props.activeTool)) && <circle cx={pickCursor.x} cy={pickCursor.y} r={8 * props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" pointerEvents="none" />}
+          {props.builder && <g className="shape-builder-regions" clipPath="url(#artboard-inside)" pointerEvents="none">{props.builder.regions.map((region, index) => {
+            const selected = props.builder!.selected.includes(index) || builderPreview.includes(index)
+            return <path key={index} data-builder-region={index} d={builderRegionPath(region.geometry)} fillRule="evenodd" fill={selected ? (props.builder!.mode === 'remove' ? '#d74444' : ACCENT) : 'white'} fillOpacity={selected ? .38 : .07} stroke={ACCENT} strokeOpacity={selected ? .95 : .55} strokeWidth="1" vectorEffect="non-scaling-stroke" />
+          })}</g>}
           {props.gridVisible && <rect className="canvas-grid-overlay" width={props.documentMeta.width} height={props.documentMeta.height} fill="url(#canvas-grid-pattern)" pointerEvents="none" />}
           {props.guidesVisible && props.userGuides.map((guide) => guide.axis === 'x'
             ? <line key={guide.id} className="user-guide guide-x" x1={guide.position} x2={guide.position} y1="0" y2={props.documentMeta.height} stroke={RULER_GUIDE_COLOR} strokeWidth="1" vectorEffect="non-scaling-stroke" onPointerDown={(event) => startGuideDrag(event, guide)} />
@@ -3174,7 +3272,7 @@ function Canvas(props: CanvasProps) {
           </g>}
           {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <g className="mask-brush-preview" pointerEvents="none"><MaskStrokeElement layer={{ id: 'preview', name: '', type: 'path', x: 0, y: 0, width: props.documentMeta.width, height: props.documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'none', stroke: 'none', strokeWidth: 0 }} stroke={{ points: draftPoints.map((point) => ({ x: point.x / props.documentMeta.width, y: point.y / props.documentMeta.height })), size: props.maskBrushSize / Math.max(1, props.documentMeta.width, props.documentMeta.height), mode: props.maskBrushMode, opacity: props.maskBrushOpacity / 100, flow: props.maskBrushFlow / 100, hardness: props.brushHardness / 100 }} paintColor={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} /></g>}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><path d={bezierPath(draftPoints, draftHandles, false)} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => { const handle = draftHandles[index]; return handle && (handle.x || handle.y) ? <line key={`handle-${index}`} x1={point.x - handle.x} y1={point.y - handle.y} x2={point.x + handle.x} y2={point.y + handle.y} stroke={ACCENT} vectorEffect="non-scaling-stroke" /> : null })}{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
-          {props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth={1 / zoomRatio} strokeDasharray={`${5 / zoomRatio} ${4 / zoomRatio}`} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+          {!props.builder && props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth={1 / zoomRatio} strokeDasharray={`${5 / zoomRatio} ${4 / zoomRatio}`} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
           {props.selectedIds.length === 1 && props.selected?.visible && !props.selected.isEmpty && props.editingTextId !== props.selected.id && (
             <SelectionOverlay
               layer={props.selected}
@@ -3205,6 +3303,7 @@ function Canvas(props: CanvasProps) {
       </div>
     </div>
     {props.activeTool === 'width' && props.selected && <div className="knife-controls width-controls" role="toolbar" aria-label="Width tool controls"><span>{widthPoint === null ? 'Tap a point on the stroke' : 'Adjust the selected point'}</span>{widthPoint !== null && <NumericControl label="Point width" min={0} max={1000} value={widthAt(props.selected.widthPoints || [], widthPoint, Math.max(props.selected.strokeWidth, 1))} onChange={(width) => { const layer = props.selected!; props.onUpdateWidth(layer.id, { widthPoints: [...(layer.widthPoints || []).filter((item) => Math.abs(item.t - widthPoint) > .001), { t: widthPoint, width }], strokeEnabled: true }) }} />}<button disabled={!props.selected.widthPoints?.length} onClick={() => { props.onUpdateWidth(props.selected!.id, { widthPoints: [] }); setWidthPoint(null) }}>Reset widths</button><button onClick={props.onKnifeDone}>Done</button></div>}
+    {props.builder && <div className="knife-controls builder-controls" role="toolbar" aria-label="Shape builder controls"><span>Drag across regions · {props.builder.selected.length} selected</span><button aria-pressed={props.builder.mode === 'merge'} onClick={() => props.onBuilderMode('merge')}>Merge</button><button aria-pressed={props.builder.mode === 'remove'} onClick={() => props.onBuilderMode('remove')}>Remove</button><button onClick={props.onBuilderClear} disabled={!props.builder.selected.length}>Clear</button><button onClick={() => props.onBuilderFinish(true)} disabled={!props.builder.selected.length}>Apply</button><button onClick={() => props.onBuilderFinish(false)}>Cancel</button></div>}
     {props.activeTool === 'knife' && <div className="knife-controls" role="toolbar" aria-label="Knife controls"><span>Tap canvas to add a cut</span><button aria-pressed={props.knifeAxis === 'x'} onClick={() => props.onKnifeAxis('x')}>Vertical</button><button aria-pressed={props.knifeAxis === 'y'} onClick={() => props.onKnifeAxis('y')}>Horizontal</button><button onClick={props.onKnifeDone}>Done</button></div>}
     {props.activeTool === 'pen' && !props.multiSelectMode && <div className={props.compactPenControls ? 'quick-style-wrap pen-actions compact' : 'pen-actions'} role="group" aria-label="Pen controls"><button aria-label="Straight pen" aria-pressed={penMode === 'straight'} onClick={() => setPenMode('straight')}>Straight</button><button aria-label="Curve pen" aria-pressed={penMode === 'curve'} onClick={() => setPenMode('curve')}>Curve</button><button disabled={draftPoints.length < 2} onClick={() => finishPenPath(false)}>Finish path</button><button disabled={!draftPoints.length} onClick={() => setPenDraft([], [])}>Cancel path</button></div>}
     {(props.activeTool === 'polygon-mask' || props.activeTool === 'wand-mask') && <div className={`selection-tool-controls ${props.compactSelectionControls ? 'compact-selection-controls' : ''}`} role="toolbar" aria-label="Mask selection controls">
@@ -3528,6 +3627,64 @@ function bezierPath(points: Point[], handles: Point[], closed: boolean) {
     else result += ` C ${a.x + outgoing.x} ${a.y + outgoing.y} ${b.x - incoming.x} ${b.y - incoming.y} ${b.x} ${b.y}`
   }
   return result + (closed ? ' Z' : '')
+}
+
+function polygonApi() {
+  return (polygonClipping as unknown as { default?: typeof polygonClipping }).default || polygonClipping
+}
+
+function partitionBuilderRegions(layers: DesignLayer[]): BuilderRegion[] {
+  const api = polygonApi()
+  let regions: BuilderRegion[] = []
+  const split = (geometry: polygonClipping.MultiPolygon, styleIndex: number): BuilderRegion[] => geometry.map((polygon) => ({ geometry: polygon, styleIndex }))
+  for (let index = 0; index < layers.length; index++) {
+    const geometry = booleanGeometry(layers[index])
+    const previous = regions
+    const next: BuilderRegion[] = []
+    let uncovered = geometry
+    for (const region of previous) {
+      const old = [region.geometry]
+      next.push(...split(api.difference(old, geometry), region.styleIndex))
+      next.push(...split(api.intersection(old, geometry), index))
+      if (uncovered.length) uncovered = api.difference(uncovered, old)
+      if (next.length > 200) throw new Error('Too many regions. Select fewer shapes.')
+    }
+    next.push(...split(uncovered, index))
+    if (next.length > 200) throw new Error('Too many regions. Select fewer shapes.')
+    regions = next
+  }
+  return regions
+}
+
+function builderRegionPath(polygon: polygonClipping.Polygon) {
+  return polygon.map((ring) => `M ${ring.map(([x, y]) => `${x} ${y}`).join(' L ')} Z`).join(' ')
+}
+
+function pointInBuilderRegion(point: Point, polygon: polygonClipping.Polygon) {
+  const insideRing = (ring: polygonClipping.Ring) => {
+    let inside = false
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j]
+      if ((yi > point.y) !== (yj > point.y) && point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi) inside = !inside
+    }
+    return inside
+  }
+  return polygon.length > 0 && insideRing(polygon[0]) && !polygon.slice(1).some(insideRing)
+}
+
+function builderSegmentHits(a: Point, b: Point, polygon: polygonClipping.Polygon) {
+  if (pointInBuilderRegion(a, polygon) || pointInBuilderRegion(b, polygon)) return true
+  const cross = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx
+  const dx = b.x - a.x, dy = b.y - a.y
+  for (const ring of polygon) for (let i = 1; i < ring.length; i++) {
+    const [x, y] = ring[i - 1], [x2, y2] = ring[i], ex = x2 - x, ey = y2 - y
+    const denominator = cross(dx, dy, ex, ey)
+    if (Math.abs(denominator) < 1e-10) continue
+    const t = cross(x - a.x, y - a.y, ex, ey) / denominator
+    const u = cross(x - a.x, y - a.y, dx, dy) / denominator
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return true
+  }
+  return false
 }
 
 // Boolean results are stored as normalized, editable compound paths. Curves are
@@ -4603,7 +4760,7 @@ function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMo
 
   if (selected && !selected.isEmpty && activeTool !== 'brush' && activeTool !== 'paint-brush') items.push({ label: 'Brush', icon: <Brush />, action: 'paint-brush' })
   if (selected && activeTool !== 'brush' && activeTool !== 'paint-brush') items.push({ label: selected.clipToBelow ? 'Unclip' : 'Clip', icon: <Layers3 />, action: 'clip', disabled: !canClip })
-  if (selected) items.push({ label: 'Layers', icon: <Layers3 />, action: 'layers' })
+  if (selected) items.push({ label: 'Layers', icon: <Layers3 />, action: 'layers' }, { label: 'More', icon: <Menu />, action: 'more', active: activeTool === 'shape-builder' })
 
   return (
     <nav className={`mobile-toolbar ${selected ? 'selection-toolbar' : ''}`} aria-label={selected ? `${selected.name} actions` : 'Design tools'}>
@@ -4813,6 +4970,7 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
+    { id: 'shape-builder', label: 'Shape builder', icon: <Shapes /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
@@ -4933,6 +5091,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   { title: 'Layers and multiple selection', keywords: 'layers order arrange lock visibility duplicate clip group assets', paragraphs: [
     'Open Layers from the bottom toolbar on a phone or the left panel on desktop. A normal tap or click selects one layer. Drag layer rows to reorder; use the visibility and lock controls to hide or protect a layer. The plus button creates an empty layer, and Assets contains built-in shapes.',
     'Long-press a layer on a phone or right-click it on desktop to start multiple selection, then select more rows. Choose Done selecting to exit. Desktop modifier selection also works on the canvas. Use the available group controls for common operations.',
+    'With adjacent opaque solid-filled vector shapes selected, choose Shape builder. Drag across highlighted regions, choose Merge or Remove, then Apply. On the keyboard, focus the artboard, use arrows (Shift for larger steps) and Enter to toggle regions. Cancel leaves the sources unchanged.',
     'With multiple shapes selected, Unite, Subtract, Intersect and Exclude create a compound path. Subtract removes upper selected shapes from the lowest selected shape. Curves are approximated, and the operation replaces its inputs; Undo restores them.',
     'For a blend, select two matching solid-colour shapes, set Steps and choose Create blend. The intermediate shapes are separate editable layers; editing an endpoint does not regenerate them. Masks, effects, images and text are not supported by this blend.',
     'Select Clip to clip an object to the layer directly below it. Reordering changes which layer is below. Duplicate, delete, alignment and arrangement controls are available in the layer or object actions.'

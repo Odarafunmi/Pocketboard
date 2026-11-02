@@ -4957,3 +4957,5 @@ button:disabled {
 .blend-count { display: flex; align-items: center; gap: 4px; }
 .blend-count .numeric-control { width: 112px; }
 .multi-mode-compact .quick-style { overflow-x: auto; max-width: calc(100vw - 20px); }
+.tool-shape-builder .artboard, .tool-shape-builder .artboard * { cursor: crosshair; }
+.builder-controls button:disabled { opacity: .5; }
