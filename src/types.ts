@@ -19,6 +19,7 @@ export type Tool =
   | 'wand-mask'
   | 'knife'
   | 'width'
+  | 'shape-builder'
 
 export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
 
