@@ -50,7 +50,7 @@ Imported images are stored in the browser and may be limited by device storage. 
 
 To sample a colour, use the picker beside a fill, gradient stop, stroke or background field, then tap the artboard. Press Escape or choose Cancel to exit. When focused, use arrow keys and Enter to sample with a keyboard. The picker samples the rendered artboard, not editor controls or the surrounding screen.
 
-Select an image and choose Extract palette from image (or Palette on mobile) to generate up to six colours from the original image. The palette stays on this device and is available in fill, gradient-stop, stroke, and background controls. Save writes the current design to this browser; export a project file for a portable backup.
+Select an image and choose Extract palette from image (or Palette on mobile) to generate up to six colours from the original image. The palette stays on this device and is available in fill, gradient-stop, stroke, and background controls. The design autosaves in this browser; Save writes an editable project file to your device.
 
 Use the pen toolbar to switch between Straight and Curve. In Straight mode, click or tap to place anchors; in Curve mode, drag an anchor to set mirrored Bézier handles. Finish with Enter or Finish path; click the first point to close. Handles are set during creation and cannot yet be edited after finishing the path.
 
@@ -125,3 +125,13 @@ Select at least two adjacent, unlocked closed shape layers, then choose **Shape 
 For keyboard access, focus the artboard, move its cursor with the arrow keys (hold Shift for larger steps), and press Enter or Space to toggle the region beneath it. The controls remain keyboard accessible. Two-finger pinch cancels an in-progress drag and zooms as usual.
 
 The region tool supports opaque, solid-filled, visible vector shapes on adjacent layers. Masks, clipping, blend effects, gradients and some complex multi-contour presets are not supported. Curved boundaries are sampled, not exact Bézier geometry; the number of regions is limited to 200.
+
+### Layer effects
+
+Select a layer and open **Properties → Fx · Layer effects** (on a phone, select the layer, choose Edit, then More). Expand Drop shadow, Inner glow, Outer glow or Bevel, enable it, and adjust its settings. Multiple effects can be combined and remain editable with undo. Effects are included in SVG and raster exports. Bevel is an SVG lighting approximation rather than a full Photoshop layer-style implementation.
+
+### Save and open an editable project file
+
+**Save** (or Ctrl/Cmd+S) saves an editable `.pocket` project on your device. Use **File → Save project file as** on desktop or **More → Save project file as** on mobile to choose another file. Open a `.pocket` file using **File → Open project file**, **More → Open project file**, or **Import project** on the home screen. Projects include layers, effects, artboards, embedded images and imported font assets, and the current guides and grid settings. Opening a project replaces the current editor document; save the current work first.
+
+On browsers supporting the File System Access API, the website asks you to choose a file and can save subsequent changes back to it during the current session. Other browsers download a new file each time and use the system file picker to reopen it. The app cannot browse your device without your selection or silently access arbitrary files. Autosave remains in browser storage and is separate from your project file; keep a file backup because browser storage can be cleared.

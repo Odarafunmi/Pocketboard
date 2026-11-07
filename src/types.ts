@@ -67,6 +67,10 @@ export type MaskSelection = { mode: 'keep' | 'hide'; feather: number } & ({ kind
 export interface FontAsset { data: string; unicodeRange?: string }
 export interface StoredFont { id: string; label: string; assets: FontAsset[] }
 
+export type FxKind = 'dropShadow' | 'innerGlow' | 'outerGlow' | 'bevel'
+export interface LayerEffect { enabled: boolean; color: string; opacity: number; size: number; angle: number; distance: number }
+export type LayerEffects = Partial<Record<FxKind, LayerEffect>>
+
 export interface DesignLayer {
   id: string
   name: string
@@ -123,6 +127,7 @@ export interface DesignLayer {
   flipX?: boolean
   flipY?: boolean
   blur?: LayerBlur
+  effects?: LayerEffects
   blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay'
 }
 

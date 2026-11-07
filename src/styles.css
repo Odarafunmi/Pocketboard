@@ -4959,3 +4959,11 @@ button:disabled {
 .multi-mode-compact .quick-style { overflow-x: auto; max-width: calc(100vw - 20px); }
 .tool-shape-builder .artboard, .tool-shape-builder .artboard * { cursor: crosshair; }
 .builder-controls button:disabled { opacity: .5; }
+.fx-note { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.fx-effect { border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.fx-effect summary { min-height: 44px; display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; }
+.fx-effect summary::before { content: '›'; font-size: 18px; }
+.fx-effect[open] summary::before { transform: rotate(90deg); }
+.fx-effect summary span { color: var(--accent); font-size: 11px; margin-left: auto; }
+.fx-color { display: flex; align-items: center; justify-content: space-between; min-height: 44px; }
+.fx-color input { width: 44px; height: 44px; border: 0; background: transparent; }

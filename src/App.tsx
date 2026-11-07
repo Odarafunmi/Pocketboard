@@ -1,3 +1,4 @@
+import { defaultEffect, effectBounds, effectKinds, effectLabels, effectMarkup, hasEffects } from './layerEffects'
 import * as polygonClipping from 'polygon-clipping'
 import {
   AlignCenter,
@@ -111,6 +112,7 @@ import type {
   CanvasGuide,
   DesignDocument,
   DesignLayer,
+  FxKind,
   ExportFormat,
   GradientFill,
   LayerType,
@@ -124,6 +126,9 @@ import type {
   Tool,
   View,
 } from './types'
+
+type LocalProjectHandle = { getFile: () => Promise<File>; createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }
+type LocalFileWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<LocalProjectHandle>; showOpenFilePicker?: (options: { multiple: boolean; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<LocalProjectHandle[]> }
 
 type MouseButtonAction = 'default' | 'pan' | 'none'
 type MouseSettings = { left: MouseButtonAction; middle: MouseButtonAction; right: MouseButtonAction; wheel: 'zoom' | 'pan' | 'none' }
@@ -149,6 +154,7 @@ const DEFAULT_GRADIENT: GradientFill = {
 const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
+  effects: layer.effects ? Object.fromEntries(Object.entries(layer.effects).map(([key, effect]) => [key, { ...effect }])) : undefined,
   compoundPolygons: layer.compoundPolygons?.map((polygon) => polygon.map((ring) => ring.map((point) => ({ ...point })))),
   penHandles: layer.penHandles?.map((point) => ({ ...point })),
   paintStrokes: layer.paintStrokes?.map((stroke) => ({ ...stroke, points: stroke.points.map((point) => ({ ...point })) })),
@@ -298,6 +304,9 @@ function App() {
   const [renaming, setRenaming] = useState(false)
   const artboardRef = useRef<SVGSVGElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const projectInputRef = useRef<HTMLInputElement>(null)
+  const projectFileRef = useRef<LocalProjectHandle | null>(null)
+  const saveProjectActionRef = useRef<() => void>(() => {})
   const clipboardRef = useRef<DesignLayer | null>(null)
   const toastTimerRef = useRef<number | null>(null)
   const layersRef = useRef(layers)
@@ -381,11 +390,11 @@ function App() {
       if (view !== 'editor' || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return
       event.preventDefault()
       event.stopPropagation()
-      saveNow()
+      saveProjectActionRef.current()
     }
     window.addEventListener('keydown', onSaveShortcut, true)
     return () => window.removeEventListener('keydown', onSaveShortcut, true)
-  }, [view, saveNow])
+  }, [view])
 
   const extractSelectedPalette = async () => {
     if (colorPickRef.current) cancelColorPick(false)
@@ -1106,6 +1115,7 @@ function App() {
       if (meta.unit === 'cm') return value * meta.dpi / 2.54
       return value * meta.dpi
     }
+    projectFileRef.current = null
     const nextMeta = { ...meta, width: round(toPx(meta.width)), height: round(toPx(meta.height)), unit: 'px' as const }
     const artboardId = makeId()
     setDocumentMeta(nextMeta)
@@ -1136,6 +1146,7 @@ function App() {
   }
 
   const openSample = () => {
+    projectFileRef.current = null
     const artboardId = makeId()
     setDocumentMeta(sampleDocument)
     setProjectName('Objects & Space')
@@ -1148,20 +1159,27 @@ function App() {
     navigate('editor')
   }
 
-  const importProject = (file: File) => {
+  const importProject = (file: File, handle: LocalProjectHandle | null = null) => {
     const reader = new FileReader()
     reader.onload = () => {
       try {
-        const payload = JSON.parse(String(reader.result)) as { name?: string; document?: DesignDocument; layers?: DesignLayer[]; artboards?: ArtboardSnapshot[] }
+        const payload = JSON.parse(String(reader.result)) as { name?: string; document?: DesignDocument; layers?: DesignLayer[]; artboards?: ArtboardSnapshot[]; activeArtboardId?: string; guides?: CanvasGuide[]; guidesVisible?: boolean; gridVisible?: boolean; gridSize?: number }
         if (!payload.document || !Array.isArray(payload.layers)) throw new Error('Invalid project')
         const importedArtboards = Array.isArray(payload.artboards) && payload.artboards.length
           ? payload.artboards
           : [{ id: makeId(), name: 'Artboard 1', document: payload.document, layers: payload.layers }]
-        setDocumentMeta(payload.document)
+        if (importedArtboards.some((board) => !board.id || !board.document || !Array.isArray(board.layers))) throw new Error('Invalid artboard')
+        const activeBoard = importedArtboards.find((board) => board.id === payload.activeArtboardId) || importedArtboards[0]
+        projectFileRef.current = handle
+        setDocumentMeta(activeBoard.document)
         setProjectName(payload.name || file.name.replace(/\.[^/.]+$/, '') || 'Imported design')
-        setLayers(cloneLayers(payload.layers))
+        layersRef.current = cloneLayers(activeBoard.layers)
+        setLayers(cloneLayers(activeBoard.layers))
         setArtboards(importedArtboards.map((artboard) => ({ ...artboard, document: { ...artboard.document }, layers: cloneLayers(artboard.layers) })))
-        setActiveArtboardId(importedArtboards[0].id)
+        setActiveArtboardId(activeBoard.id)
+        setCanvasGuides(Array.isArray(payload.guides) ? payload.guides : [])
+        setGuidesVisible(Boolean(payload.guidesVisible)); setGridVisible(Boolean(payload.gridVisible)); setGridSize(typeof payload.gridSize === 'number' ? clamp(payload.gridSize, 4, 500) : 80)
+        setMultiIds([]); setMultiSelectMode(false); setActiveTool('select')
         setPast([])
         setFuture([])
         setSelectedId(null)
@@ -1174,7 +1192,40 @@ function App() {
     reader.readAsText(file)
   }
 
+  const saveProjectFile = async (saveAs = false) => {
+    try {
+      const picker = (window as LocalFileWindow).showSaveFilePicker
+      let handle = saveAs ? null : projectFileRef.current
+      const safeName = (projectName.trim().replace(/[\\/:*?"<>|]/g, '-') || 'Untitled design') + '.pocket'
+      if (!handle && picker) {
+        try { handle = await picker.call(window, { suggestedName: safeName, types: [{ description: 'Pocketboard project', accept: { 'application/json': ['.pocket'] } }] }) }
+        catch (error) { if ((error as DOMException).name !== 'SecurityError') throw error }
+      }
+      const boards = artboards.map((board) => board.id === activeArtboardId ? { ...board, document: documentMeta, layers: layersRef.current } : board)
+      const embedded = await Promise.all(boards.map(async (board) => ({ ...board, layers: await embedProjectImages(board.layers) })))
+      const active = embedded.find((board) => board.id === activeArtboardId) || embedded[0]
+      const blob = new Blob([JSON.stringify({ version: 3, name: projectName, document: active.document, layers: active.layers, artboards: embedded, activeArtboardId: active.id, guides: canvasGuides, guidesVisible, gridVisible, gridSize }, null, 2)], { type: 'application/json' })
+      if (handle) { const stream = await handle.createWritable(); await stream.write(blob); await stream.close(); projectFileRef.current = handle; showToast('Project file saved') }
+      else { downloadBlob(blob, safeName); showToast('Project file downloaded') }
+    } catch (error) { if ((error as DOMException).name !== 'AbortError') showToast('Could not save the project file.') }
+  }
+
+  saveProjectActionRef.current = () => void saveProjectFile()
+
+  const openProjectFile = async () => {
+    const picker = (window as LocalFileWindow).showOpenFilePicker
+    if (!picker) { projectInputRef.current?.click(); return }
+    try {
+      const [handle] = await picker.call(window, { multiple: false, types: [{ description: 'Pocketboard project', accept: { 'application/json': ['.pocket'] } }] })
+      if (handle) importProject(await handle.getFile(), handle)
+    } catch (error) {
+      if ((error as DOMException).name === 'SecurityError') projectInputRef.current?.click()
+      else if ((error as DOMException).name !== 'AbortError') showToast('Could not open the project file.')
+    }
+  }
+
   const openPsd = (fileName: string, width: number, height: number, src: string) => {
+    projectFileRef.current = null
     finishTextEditing()
     const id = makeId()
     const name = fileName.replace(/\.(psd|ai)$/i, '') || 'Imported design'
@@ -1288,7 +1339,7 @@ function App() {
         renaming={renaming}
         setRenaming={setRenaming}
         savingState={savingState}
-        onSave={saveNow}
+        onSave={() => void saveProjectFile()}
         canUndo={past.length > 0}
         canRedo={future.length > 0}
         onUndo={undo}
@@ -1306,6 +1357,7 @@ function App() {
         onNew={() => navigate('new')}
         onSave={saveNow}
         onImport={() => imageInputRef.current?.click()}
+        onSaveProject={() => void saveProjectFile()} onSaveProjectAs={() => void saveProjectFile(true)} onOpenProject={() => void openProjectFile()}
         onOpenPsd={() => setPsdOpen('psd')}
         onOpenAi={() => setPsdOpen('ai')}
         onExport={() => setExportOpen(true)}
@@ -1659,7 +1711,9 @@ function App() {
           {mobileSheet === 'more' && (
             <MoreMenu
               onAction={(action) => {
-                if (action === 'new') navigate('new')
+                if (action === 'save-project' || action === 'save-project-as') { setMobileSheet(null); void saveProjectFile(action === 'save-project-as'); return }
+                else if (action === 'open-project') { setMobileSheet(null); void openProjectFile(); return }
+                else if (action === 'new') navigate('new')
                 else if (action === 'export') setExportOpen(true)
                 else if (action === 'grid') setGridVisible((visible) => !visible)
                 else if (action === 'rulers') toggleGuides()
@@ -1696,6 +1750,7 @@ function App() {
 
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       {psdOpen && <PsdImportDialog kind={psdOpen} onClose={() => setPsdOpen(false)} onImport={openPsd} />}
+      <input ref={projectInputRef} className="visually-hidden" type="file" accept=".pocket,application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) importProject(file); event.target.value = '' }} />
       <input ref={imageInputRef} className="visually-hidden" type="file" accept="image/*" multiple onChange={handleImageUpload} />
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
@@ -1761,7 +1816,7 @@ function TopBar(props: TopBarProps) {
         </div>
       </div>
       <div className="topbar-actions">
-        <button className="button secondary save-button" aria-label="Save design" title="Save on this device · Ctrl S" onClick={props.onSave}><Save size={17} /><span>Save</span></button>
+        <button className="button secondary save-button" aria-label="Save design" title="Save project file · Ctrl S" onClick={props.onSave}><Save size={17} /><span>Save</span></button>
         <IconButton className="theme-button" label={props.theme === 'light' ? 'Use dark theme' : 'Use light theme'} onClick={props.onToggleTheme}>
           {props.theme === 'light' ? <Moon /> : <Sun />}
         </IconButton>
@@ -1774,7 +1829,7 @@ function TopBar(props: TopBarProps) {
 }
 
 type EditorMenuProps = {
-  onNew: () => void; onSave: () => void; onImport: () => void; onOpenPsd: () => void; onOpenAi: () => void; onExport: () => void
+  onNew: () => void; onSave: () => void; onImport: () => void; onSaveProject: () => void; onSaveProjectAs: () => void; onOpenProject: () => void; onOpenPsd: () => void; onOpenAi: () => void; onExport: () => void
   onUndo: () => void; onRedo: () => void; canUndo: boolean; canRedo: boolean
   onDuplicate: () => void; onDelete: () => void; hasSelection: boolean
   onDeselect: () => void; onSelectTool: () => void; onObjectSelect: () => void
@@ -1797,7 +1852,10 @@ function EditorMenu(props: EditorMenuProps) {
   const groups = [
     { name: 'File', items: [
       { label: 'New design', action: props.onNew },
-      { label: 'Save', action: props.onSave },
+      { label: 'Save to browser', action: props.onSave },
+      { label: 'Save project file', action: props.onSaveProject },
+      { label: 'Save project file as', action: props.onSaveProjectAs },
+      { label: 'Open project file', action: props.onOpenProject },
       { label: 'Import from device', action: props.onImport },
       { label: 'Open PSD', action: props.onOpenPsd },
       { label: 'Open Illustrator file', action: props.onOpenAi },
@@ -3344,6 +3402,7 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
             : <image href={selection.image} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="none" filter={selection.feather ? `url(#selection-feather-${layer.id}-${index})` : undefined} />}
         </mask>
       </g>)}
+      {hasEffects(layer) && <filter id={`fx-${layer.id}`} filterUnits="userSpaceOnUse" {...effectBounds(layer)} colorInterpolationFilters="sRGB" dangerouslySetInnerHTML={{ __html: effectMarkup(layer) }} />}
       {layer.blur?.enabled && layer.blur.type === 'gaussian' && <filter id={`blur-${layer.id}`} filterUnits="userSpaceOnUse" {...gaussianBounds(layer)} colorInterpolationFilters="sRGB"><feGaussianBlur stdDeviation={layer.blur.amount} /></filter>}
       {Boolean(layer.maskStrokes?.length || layer.maskSelections?.length) && (
         <mask id={`paint-mask-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={layer.x - layer.width} y={layer.y - Math.max(layer.height, layer.width)} width={layer.width * 3} height={Math.max(layer.height, layer.width) * 3}>
@@ -3523,15 +3582,16 @@ function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }
   }
   const source = <g transform={transform} mask={layer.maskStrokes?.length || layer.maskSelections?.length ? `url(#paint-mask-${layer.id})` : undefined}>{content}</g>
   const samples = blurSamples(layer)
+  const blurred = layer.blur?.enabled && layer.blur.type === 'gaussian'
+    ? <g filter={`url(#blur-${layer.id})`}>{source}</g>
+    : samples.length ? samples.map((sample, index) => <g key={index} transform={sample.transform} opacity={sample.opacity} style={{ mixBlendMode: 'plus-lighter' }}>{source}</g>) : source
   return <g
     onPointerDown={onPointerDown}
     onDoubleClick={onDoubleClick}
     data-layer={layer.id}
     mask={clipMask}
     style={{ cursor: layer.locked ? 'not-allowed' : undefined, mixBlendMode: layer.blendMode || 'normal', isolation: 'isolate' }}
-  >{layer.blur?.enabled && layer.blur.type === 'gaussian'
-    ? <g filter={`url(#blur-${layer.id})`}>{source}</g>
-    : samples.length ? samples.map((sample, index) => <g key={index} transform={sample.transform} opacity={sample.opacity} style={{ mixBlendMode: 'plus-lighter' }}>{source}</g>) : source}</g>
+  >{hasEffects(layer) ? <g filter={`url(#fx-${layer.id})`}>{blurred}</g> : blurred}</g>
 }
 
 function TextEditorOverlay({ layer, onUpdate, onFinish }: {
@@ -4220,6 +4280,24 @@ function PropertiesPanel(props: PropertiesPanelProps) {
         {props.imagePalette && <ImagePalettePreview palette={props.imagePalette} />}
         <small className="palette-note">Colours are extracted from the original image on this device.</small>
       </PropertySection>}
+
+      <PropertySection title="Fx · Layer effects">
+        <p className="fx-note">Non-destructive effects apply to the selected layer.</p>
+        {effectKinds.map((kind: FxKind) => {
+          const effect = layer.effects?.[kind] || defaultEffect(kind)
+          const update = (patch: Partial<typeof effect>) => props.onUpdate({ effects: { ...layer.effects, [kind]: { ...effect, ...patch } } })
+          return <details className="fx-effect" key={kind}>
+            <summary>{effectLabels[kind]}{effect.enabled && <span>On</span>}</summary>
+            <ToggleRow label={`Enable ${effectLabels[kind].toLowerCase()}`} checked={effect.enabled} onChange={(enabled) => update({ enabled })} />
+            <label className="fx-color">Colour <input type="color" aria-label={`${effectLabels[kind]} colour`} value={/^#[0-9a-f]{6}$/i.test(effect.color) ? effect.color : '#ffffff'} onChange={(event) => update({ color: event.target.value })} /></label>
+            <SliderField label={`${effectLabels[kind]} opacity`} value={effect.opacity} min={0} max={100} unit="%" onChange={(opacity) => update({ opacity })} />
+            <SliderField label={`${effectLabels[kind]} size`} value={effect.size} min={0} max={100} unit="px" onChange={(size) => update({ size })} />
+            {(kind === 'dropShadow' || kind === 'bevel') && <SliderField label={`${effectLabels[kind]} angle`} value={effect.angle} min={-180} max={180} unit="°" onChange={(angle) => update({ angle })} />}
+            {kind === 'dropShadow' && <SliderField label="Drop shadow distance" value={effect.distance} min={0} max={200} unit="px" onChange={(distance) => update({ distance })} />}
+          </details>
+        })}
+        <p className="fx-note">Bevel is an SVG lighting approximation, not a Photoshop layer style.</p>
+      </PropertySection>
 
       <PropertySection title="Blur">
         <label className="blur-select"><span>Effect</span><select aria-label="Blur effect" value={layer.blur?.type || 'none'} onChange={(event) => {
@@ -4961,6 +5039,9 @@ function MouseSettingsPanel({ settings, onChange }: { settings: MouseSettings; o
 function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
   const actions = [
     { id: 'new', label: 'New design', icon: <Plus /> },
+    { id: 'save-project', label: 'Save project file', icon: <Save /> },
+    { id: 'save-project-as', label: 'Save project file as', icon: <Copy /> },
+    { id: 'open-project', label: 'Open project file', icon: <FolderOpen /> },
     { id: 'open-psd', label: 'Open PSD', icon: <FileText /> },
     { id: 'open-ai', label: 'Open Illustrator file', icon: <FileText /> },
     { id: 'object-select', label: 'Object selection', icon: <ScanSearch /> },
@@ -5080,7 +5161,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
     'Choose New design, select a preset or enter custom width and height. Dimensions accept multiplication such as 1080 * 3. Choose a background and select Create design.',
     'Open PSD on the home screen, or File → Open PSD on desktop / More → Open PSD on a phone. PSD files open as a single flattened image using their saved composite; Photoshop layers, editable text, masks and effects do not remain editable. Save the current design as a Project backup before opening another design.',
     'Open AI on the home screen, or File → Open Illustrator file on desktop / More → Open Illustrator file on a phone. AI files must be saved with Create PDF Compatible File enabled. The first PDF page opens as a flattened image; Illustrator paths and text are not editable. EPS is not supported; export an SVG or PNG from Illustrator instead.',
-    'Designs save automatically on this device. Use Save for an immediate save. Export → Project creates an editable .pocket backup; Import project on the home screen restores it. Browser storage can be cleared, so keep backups.',
+    'Designs autosave in browser storage. Save or Ctrl/Cmd+S writes an editable .pocket project file; use File or More → Save project file as to choose another file. Open project file in File or More, or Import project on the home screen, to restore it. Supported browsers can save back to the chosen file during the session; others download a new copy. Browser storage can be cleared, so keep backups.',
     'Use Manage artboards from More on a phone or the artboard controls on desktop to add, switch or delete artboards. On touch, long-press an artboard to open the artboard list. Deleting an artboard removes its layers.'
   ] },
   { title: 'Select, move, resize and zoom', keywords: 'transform select rotation handle pinch pan corners proportions', paragraphs: [
@@ -5102,6 +5183,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   ] },
   { title: 'Shapes, colour and effects', keywords: 'rectangle ellipse polygon star fill stroke opacity gradient blur palette', paragraphs: [
     'Choose Shapes on a phone or a shape tool on desktop. The Assets panel offers more built-in shapes. Select a shape and use Edit or Fill for its quick toolbar. Choose No fill and set a stroke colour and width independently; choose Solid, Dashed or Dotted under Pattern. More opens detailed settings such as gradients.',
+    'In Properties, Fx · Layer effects provides non-destructive drop shadow, inner glow, outer glow and an approximate bevel. Each effect can be enabled and adjusted independently; the effects remain editable in .pocket files and are included in exports.',
     'Use colour controls to choose a colour or sample one from the canvas. Properties also provide alignment, blend and blur effects where supported. Image palette extracts colours from a selected image.'
   ] },
   { title: 'Images, crop and masks', keywords: 'image import photo crop mask brush clipping polygon magic wand feather tolerance', paragraphs: [
@@ -5386,6 +5468,13 @@ function downloadBlob(blob: Blob, name: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+async function embedProjectImages(layers: DesignLayer[]) {
+  return Promise.all(layers.map(async (layer) => {
+    if (layer.type !== 'image' || !layer.src || layer.src.startsWith('data:')) return layer
+    return { ...layer, src: await imageToDataUrl(layer.src) }
+  }))
+}
+
 function imageToDataUrl(url: string) {
   return fetch(url).then((response) => response.blob()).then((blob) => new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
@@ -5415,6 +5504,7 @@ function embeddedFontCss(layers: DesignLayer[]) {
 function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground: boolean) {
   const defs = `<style>${embeddedFontCss(layers)}</style>` + layers.map((layer) => {
     let definition = ''
+    if (hasEffects(layer)) { const bounds = effectBounds(layer); definition += `<filter id="fx-${layer.id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" color-interpolation-filters="sRGB">${effectMarkup(layer)}</filter>` }
     layer.maskSelections?.forEach((selection, index) => {
       const id = `${layer.id}-${index}`
       if (selection.feather > 0) {
@@ -5470,7 +5560,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
       const samples = blurSamples(layer)
       const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
-      return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${filtered}</g>`
+      return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${hasEffects(layer) ? `<g filter="url(#fx-${layer.id})">${filtered}</g>` : filtered}</g>`
     }
     if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke, index) => maskStrokeSvg(layer, stroke, `soft-paint-${escapeXml(layer.id)}-${index}`, stroke.color)).join('')}</g>`)
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} opacity="${opacity}"/>`)
@@ -5531,7 +5621,7 @@ function HomeScreen({ theme, onToggleTheme, onNew, onHelp, onOpenPsd, onOpenAi, 
             <button onClick={onNew}><span className="quick-icon custom"><SlidersHorizontal /></span><div><strong>Custom size</strong><small>Set your own dimensions</small></div><Plus /></button>
           </div>
         </section>
-        <div className="backup-reminder"><span><FolderOpen size={19} /></span><div><strong>Keep a backup of your work</strong><p>Your designs are stored on this device only. Export a backup to keep them safe.</p>{backupHelp && <p className="backup-help" role="status">Open a design, choose Export, then select Project to save an editable .pocket backup.</p>}</div><button className="button secondary" onClick={() => setBackupHelp((visible) => !visible)} aria-expanded={backupHelp}>{backupHelp ? 'Hide guide' : 'Learn how'}</button></div>
+        <div className="backup-reminder"><span><FolderOpen size={19} /></span><div><strong>Keep a backup of your work</strong><p>Your designs are stored on this device only. Export a backup to keep them safe.</p>{backupHelp && <p className="backup-help" role="status">Open a design and choose Save to write an editable .pocket project file.</p>}</div><button className="button secondary" onClick={() => setBackupHelp((visible) => !visible)} aria-expanded={backupHelp}>{backupHelp ? 'Hide guide' : 'Learn how'}</button></div>
       </main>
       <input ref={importInputRef} className="visually-hidden" type="file" accept=".pocket,application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) onImport(file); event.target.value = '' }} />
     </div>
