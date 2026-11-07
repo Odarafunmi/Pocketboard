@@ -1,3 +1,5 @@
+import { rememberProjectHandle, restoreProjectHandle } from './projectHandle'
+import { cameraRawMarkup, DEFAULT_CAMERA_RAW } from './cameraRaw'
 import { defaultEffect, effectBounds, effectKinds, effectLabels, effectMarkup, hasEffects } from './layerEffects'
 import * as polygonClipping from 'polygon-clipping'
 import {
@@ -15,6 +17,7 @@ import {
   ArrowLeft,
   ArrowUp,
   Brush,
+  Camera,
   Bold,
   Check,
   ChevronDown,
@@ -110,6 +113,7 @@ import type {
   ArtboardSnapshot,
   BlurType,
   CanvasGuide,
+  CameraRawSettings,
   DesignDocument,
   DesignLayer,
   FxKind,
@@ -127,7 +131,7 @@ import type {
   View,
 } from './types'
 
-type LocalProjectHandle = { getFile: () => Promise<File>; createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }
+type LocalProjectHandle = { requestPermission?: (options: { mode: 'readwrite' }) => Promise<PermissionState>; getFile: () => Promise<File>; createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }
 type LocalFileWindow = Window & { showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<LocalProjectHandle>; showOpenFilePicker?: (options: { multiple: boolean; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<LocalProjectHandle[]> }
 
 type MouseButtonAction = 'default' | 'pan' | 'none'
@@ -154,6 +158,7 @@ const DEFAULT_GRADIENT: GradientFill = {
 const cloneLayers = (layers: DesignLayer[]) => layers.map((layer) => ({
   ...layer,
   points: layer.points?.map((point) => ({ ...point })),
+  cameraRaw: layer.cameraRaw ? { ...layer.cameraRaw } : undefined,
   effects: layer.effects ? Object.fromEntries(Object.entries(layer.effects).map(([key, effect]) => [key, { ...effect }])) : undefined,
   compoundPolygons: layer.compoundPolygons?.map((polygon) => polygon.map((ring) => ring.map((point) => ({ ...point })))),
   penHandles: layer.penHandles?.map((point) => ({ ...point })),
@@ -283,6 +288,7 @@ function App() {
   }
   const [psdOpen, setPsdOpen] = useState<false | 'psd' | 'ai'>(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [cameraRawId, setCameraRawId] = useState<string | null>(null)
   const [helpOpen, setHelpOpen] = useState(false)
   const [savingState, setSavingState] = useState<'Saving' | 'Saved' | 'Not saved'>('Saved')
   const [imagePalette, setImagePalette] = useState<{ name: string; colors: string[] } | null>(() => {
@@ -306,6 +312,20 @@ function App() {
   const imageInputRef = useRef<HTMLInputElement>(null)
   const projectInputRef = useRef<HTMLInputElement>(null)
   const projectFileRef = useRef<LocalProjectHandle | null>(null)
+  const projectHandleVersion = useRef(0)
+  const associateProjectFile = (handle: LocalProjectHandle | null, persist = true) => {
+    projectHandleVersion.current++
+    projectFileRef.current = handle
+    rememberProjectHandle(persist ? handle : null)
+  }
+  useEffect(() => {
+    let active = true
+    const version = projectHandleVersion.current
+    void restoreProjectHandle<LocalProjectHandle>().then((handle) => {
+      if (active && version === projectHandleVersion.current && handle && typeof handle.createWritable === 'function') projectFileRef.current = handle
+    })
+    return () => { active = false }
+  }, [])
   const saveProjectActionRef = useRef<() => void>(() => {})
   const clipboardRef = useRef<DesignLayer | null>(null)
   const toastTimerRef = useRef<number | null>(null)
@@ -1050,7 +1070,7 @@ function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (helpOpen || psdOpen) return
+      if (helpOpen || psdOpen || cameraRawId) return
       const target = event.target as HTMLElement
       const editing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable
       const command = event.metaKey || event.ctrlKey
@@ -1106,7 +1126,7 @@ function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, finishTextEditing, helpOpen, psdOpen, redo, selectedId, undo, updateSelection])
+  }, [activeTool, activateMaskBrush, commitLayers, deleteSelected, duplicateSelected, finishTextEditing, helpOpen, psdOpen, cameraRawId, redo, selectedId, undo, updateSelection])
 
   const createDesign = (meta: DesignDocument, name: string) => {
     const toPx = (value: number) => {
@@ -1115,7 +1135,7 @@ function App() {
       if (meta.unit === 'cm') return value * meta.dpi / 2.54
       return value * meta.dpi
     }
-    projectFileRef.current = null
+    associateProjectFile(null)
     const nextMeta = { ...meta, width: round(toPx(meta.width)), height: round(toPx(meta.height)), unit: 'px' as const }
     const artboardId = makeId()
     setDocumentMeta(nextMeta)
@@ -1146,7 +1166,7 @@ function App() {
   }
 
   const openSample = () => {
-    projectFileRef.current = null
+    associateProjectFile(null)
     const artboardId = makeId()
     setDocumentMeta(sampleDocument)
     setProjectName('Objects & Space')
@@ -1170,7 +1190,7 @@ function App() {
           : [{ id: makeId(), name: 'Artboard 1', document: payload.document, layers: payload.layers }]
         if (importedArtboards.some((board) => !board.id || !board.document || !Array.isArray(board.layers))) throw new Error('Invalid artboard')
         const activeBoard = importedArtboards.find((board) => board.id === payload.activeArtboardId) || importedArtboards[0]
-        projectFileRef.current = handle
+        associateProjectFile(handle, false)
         setDocumentMeta(activeBoard.document)
         setProjectName(payload.name || file.name.replace(/\.[^/.]+$/, '') || 'Imported design')
         layersRef.current = cloneLayers(activeBoard.layers)
@@ -1192,22 +1212,32 @@ function App() {
     reader.readAsText(file)
   }
 
-  const saveProjectFile = async (saveAs = false) => {
+  const saveProjectFile = async (saveAs = false, suggestedName?: string): Promise<'saved' | 'downloaded' | 'cancelled' | 'error'> => {
     try {
+      const associationVersion = projectHandleVersion.current
       const picker = (window as LocalFileWindow).showSaveFilePicker
       let handle = saveAs ? null : projectFileRef.current
-      const safeName = (projectName.trim().replace(/[\\/:*?"<>|]/g, '-') || 'Untitled design') + '.pocket'
+      const safeName = ((suggestedName || projectName).trim().replace(/[\\/:*?"<>|]/g, '-').replace(/\.pocket$/i, '') || 'Untitled design') + '.pocket'
       if (!handle && picker) {
         try { handle = await picker.call(window, { suggestedName: safeName, types: [{ description: 'Pocketboard project', accept: { 'application/json': ['.pocket'] } }] }) }
         catch (error) { if ((error as DOMException).name !== 'SecurityError') throw error }
       }
+      if (handle?.requestPermission && await handle.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('Write permission denied')
       const boards = artboards.map((board) => board.id === activeArtboardId ? { ...board, document: documentMeta, layers: layersRef.current } : board)
       const embedded = await Promise.all(boards.map(async (board) => ({ ...board, layers: await embedProjectImages(board.layers) })))
       const active = embedded.find((board) => board.id === activeArtboardId) || embedded[0]
       const blob = new Blob([JSON.stringify({ version: 3, name: projectName, document: active.document, layers: active.layers, artboards: embedded, activeArtboardId: active.id, guides: canvasGuides, guidesVisible, gridVisible, gridSize }, null, 2)], { type: 'application/json' })
-      if (handle) { const stream = await handle.createWritable(); await stream.write(blob); await stream.close(); projectFileRef.current = handle; showToast('Project file saved') }
-      else { downloadBlob(blob, safeName); showToast('Project file downloaded') }
-    } catch (error) { if ((error as DOMException).name !== 'AbortError') showToast('Could not save the project file.') }
+      if (handle) { const stream = await handle.createWritable(); await stream.write(blob); await stream.close(); if (associationVersion === projectHandleVersion.current) associateProjectFile(handle, persistDocument()); showToast('Project file saved'); return 'saved' }
+      downloadBlob(blob, safeName)
+      // A download cannot be updated in place; never leave a previous file linked.
+      if (saveAs && associationVersion === projectHandleVersion.current) associateProjectFile(null)
+      showToast('Downloaded a copy. This browser cannot update it directly.')
+      return 'downloaded'
+    } catch (error) {
+      if ((error as DOMException).name === 'AbortError') return 'cancelled'
+      showToast('Could not save the project file.')
+      return 'error'
+    }
   }
 
   saveProjectActionRef.current = () => void saveProjectFile()
@@ -1225,7 +1255,7 @@ function App() {
   }
 
   const openPsd = (fileName: string, width: number, height: number, src: string) => {
-    projectFileRef.current = null
+    associateProjectFile(null)
     finishTextEditing()
     const id = makeId()
     const name = fileName.replace(/\.(psd|ai)$/i, '') || 'Imported design'
@@ -1297,6 +1327,7 @@ function App() {
     else if (action === 'extract-palette') { setMobileSheet('properties'); void extractSelectedPalette() }
     else if (action === 'layers') setMobileSheet('layers')
     else if (action === 'more') setMobileSheet('more')
+    else if (action === 'camera-raw') { if (selected?.type === 'image' && !selected.locked) setCameraRawId(selected.id); else showToast('Select an unlocked image first.') }
     else if ((action === 'properties' || action === 'fill' || action === 'shape-mask' || (action === 'align' && selected?.type === 'text')) && selected && !selected.locked) {
       const close = Boolean(showQuickStyle && quickStyleAction === action)
       setMobileSheet(null)
@@ -1384,6 +1415,7 @@ function App() {
             else if (tool === 'paint-brush' && activeTool === 'brush') return
             else if (tool === 'brush') activateMaskBrush()
             else if (tool === 'polygon-mask' || tool === 'wand-mask') activateSelection(tool)
+            else if (tool === 'camera-raw') { if (selected?.type === 'image' && !selected.locked) setCameraRawId(selected.id); else showToast('Select an unlocked image first.') }
             else if (tool === 'shape-builder') startShapeBuilder()
             else if (tool === 'width' && (!selected || !supportsWidthTool(selected))) showToast('Select an unlocked line or open path.')
             else {
@@ -1727,6 +1759,7 @@ function App() {
                 else if (action === 'paint-brush') { finishTextEditing(); setActiveTool('paint-brush'); setMobileSheet(null); return }
                 else if (action === 'polygon-mask' || action === 'wand-mask') { activateSelection(action); return }
                 else if (action === 'width') { if (selected && supportsWidthTool(selected)) setActiveTool('width'); else showToast('Select an unlocked line or open path.'); setMobileSheet(null); return }
+                else if (action === 'camera-raw') { setMobileSheet(null); if (selected?.type === 'image' && !selected.locked) setCameraRawId(selected.id); else showToast('Select an unlocked image first.'); return }
                 else if (action === 'shape-builder') { setMobileSheet(null); startShapeBuilder(); return }
                 else if (action === 'object-select' || action === 'pen' || action === 'zoom' || action === 'corner' || action === 'knife') { if (action === 'knife') setMultiSelectMode(false); setActiveTool(action) }
                 setMobileSheet(null)
@@ -1736,6 +1769,8 @@ function App() {
         </MobileSheetView>
       )}
 
+      {cameraRawId && (() => { const layer = layers.find((item) => item.id === cameraRawId); return layer?.type === 'image' && !layer.locked ? <CameraRawDialog layer={layer} layers={layers} onClose={() => setCameraRawId(null)} onApply={(cameraRaw) => { updateLayer(layer.id, { cameraRaw }); setCameraRawId(null) }} /> : null })()}
+
       {exportOpen && (
         <ExportDialog
           projectName={projectName}
@@ -1743,6 +1778,7 @@ function App() {
           layers={layers}
           artboards={exportArtboards}
           guides={canvasGuides.filter((guide) => !guide.slice || guide.artboardId === activeArtboardId)}
+          onProjectExport={(name) => saveProjectFile(true, name)}
           onClose={() => setExportOpen(false)}
           onSuccess={(message) => { setExportOpen(false); showToast(message) }}
         />
@@ -1947,6 +1983,7 @@ function ToolRail({ activeTool, onTool, onGrid, onGuides, onAddArtboard }: { act
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
     { id: 'shape-builder', label: 'Shape builder', icon: <Shapes /> },
+    { id: 'camera-raw', label: 'Camera raw filter', icon: <Camera /> },
     { id: 'pen', label: 'Pen tool', shortcut: 'P', icon: <PenTool />, divider: true },
     { id: 'paint-brush', label: 'Brush', shortcut: 'B', icon: <Brush /> },
     { id: 'brush', label: 'Mask brush', icon: <Eraser /> },
@@ -3307,7 +3344,7 @@ function Canvas(props: CanvasProps) {
             <clipPath id="artboard-outside"><path d={outsidePath} clipRule="evenodd" /></clipPath>
             {props.layers.map((layer) => <LayerDefinition key={layer.id} layer={layer} />)}
             {props.layers.map((layer, index) => layer.clipToBelow && <mask key={layer.id} id={`layer-clip-${layer.id}`} maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x={-overflow} y={-overflow} width={props.documentMeta.width + overflow * 2} height={props.documentMeta.height + overflow * 2} style={{ maskType: 'alpha' }}>
-              {index > 0 && props.layers[index - 1].visible && <LayerElement layer={props.layers[index - 1]} clipMask={props.layers[index - 1].clipToBelow ? `url(#layer-clip-${props.layers[index - 1].id})` : undefined} onPointerDown={() => {}} onDoubleClick={() => {}} />}
+              {index > 0 && props.layers[index - 1].visible && <LayerElement layer={clippingBase(props.layers[index - 1])} clipMask={props.layers[index - 1].clipToBelow ? `url(#layer-clip-${props.layers[index - 1].id})` : undefined} onPointerDown={() => {}} onDoubleClick={() => {}} />}
             </mask>)}
           </defs>
           <g className="outside-artboard" clipPath="url(#artboard-outside)" opacity="0.48">{renderLayers()}</g>
@@ -3402,6 +3439,7 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
             : <image href={selection.image} x={layer.x} y={layer.y} width={layer.width} height={layer.height} preserveAspectRatio="none" filter={selection.feather ? `url(#selection-feather-${layer.id}-${index})` : undefined} />}
         </mask>
       </g>)}
+      {layer.type === 'image' && layer.cameraRaw && <filter id={`raw-${layer.id}`} x="-10%" y="-10%" width="120%" height="120%" colorInterpolationFilters="sRGB" dangerouslySetInnerHTML={{ __html: cameraRawMarkup(layer.cameraRaw) }} />}
       {hasEffects(layer) && <filter id={`fx-${layer.id}`} filterUnits="userSpaceOnUse" {...effectBounds(layer)} colorInterpolationFilters="sRGB" dangerouslySetInnerHTML={{ __html: effectMarkup(layer) }} />}
       {layer.blur?.enabled && layer.blur.type === 'gaussian' && <filter id={`blur-${layer.id}`} filterUnits="userSpaceOnUse" {...gaussianBounds(layer)} colorInterpolationFilters="sRGB"><feGaussianBlur stdDeviation={layer.blur.amount} /></filter>}
       {Boolean(layer.maskStrokes?.length || layer.maskSelections?.length) && (
@@ -3529,6 +3567,13 @@ function blurSamples(layer: DesignLayer): { transform: string; opacity: number }
   })
 }
 
+// A clipping base uses the layer's underlying content and masks, not effects
+// or the decorative stroke around a filled shape.
+function clippingBase(layer: DesignLayer): DesignLayer {
+  const isFilledShape = ['rectangle', 'ellipse', 'polygon', 'star'].includes(layer.type) || (layer.type === 'path' && layer.closed)
+  return { ...layer, ...(isFilledShape ? { strokeEnabled: false, strokeWidth: 0 } : {}), blur: undefined, effects: undefined, cameraRaw: undefined }
+}
+
 function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }: {
   layer: DesignLayer
   editing?: boolean
@@ -3580,7 +3625,8 @@ function LayerElement({ layer, editing, clipMask, onPointerDown, onDoubleClick }
       </text>
     )
   }
-  const source = <g transform={transform} mask={layer.maskStrokes?.length || layer.maskSelections?.length ? `url(#paint-mask-${layer.id})` : undefined}>{content}</g>
+  const adjustedContent = layer.type === 'image' && layer.cameraRaw ? <g filter={`url(#raw-${layer.id})`}>{content}</g> : content
+  const source = <g transform={transform} mask={layer.maskStrokes?.length || layer.maskSelections?.length ? `url(#paint-mask-${layer.id})` : undefined}>{adjustedContent}</g>
   const samples = blurSamples(layer)
   const blurred = layer.blur?.enabled && layer.blur.type === 'gaussian'
     ? <g filter={`url(#blur-${layer.id})`}>{source}</g>
@@ -4748,7 +4794,7 @@ function QuickStyleToolbar({ layer, onUpdate, onClose, onMore, onMaskMore, onAct
 type MobileToolAction =
   | 'select' | 'object-select' | 'mask-brush' | 'paint-brush' | 'shapes' | 'text' | 'image' | 'layers' | 'more'
   | 'properties' | 'fill' | 'clip' | 'edit-text' | 'finish-text' | 'extract-palette' | 'corners' | 'align' | 'arrange' | 'duplicate' | 'delete' | 'crop' | 'shape-mask'
-  | 'polygon-mask' | 'wand-mask' | 'width'
+  | 'polygon-mask' | 'wand-mask' | 'width' | 'camera-raw'
   | 'mask-done' | 'mask-hide' | 'mask-restore' | 'mask-smaller' | 'mask-larger' | 'mask-clear'
 
 function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMode, quickStyleAction, onAction }: {
@@ -4799,6 +4845,7 @@ function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMo
       items = [
         { label: 'Polygonal', icon: <LassoSelect />, action: 'polygon-mask', active: activeTool === 'polygon-mask' },
         { label: 'Magic wand', icon: <WandSparkles />, action: 'wand-mask', active: activeTool === 'wand-mask' },
+        { label: 'Camera raw', icon: <Camera />, action: 'camera-raw' },
         { label: 'Palette', icon: <Palette />, action: 'extract-palette' },
         { label: 'Mask brush', icon: <Brush />, action: 'mask-brush' },
         { label: 'Crop', icon: <Crop />, action: 'crop', active: activeTool === 'crop' },
@@ -4854,6 +4901,13 @@ function MobileToolbar({ activeTool, selected, editingText, canClip, maskBrushMo
 
 function MobileSheetView({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const dialogRef = useRef<HTMLElement>(null)
+  const [sliderPreview, setSliderPreview] = useState(false)
+  useEffect(() => {
+    const reset = () => setSliderPreview(false)
+    window.addEventListener('pointerup', reset); window.addEventListener('pointercancel', reset); window.addEventListener('blur', reset)
+    return () => { window.removeEventListener('pointerup', reset); window.removeEventListener('pointercancel', reset); window.removeEventListener('blur', reset) }
+  }, [])
+  useEffect(() => { setSliderPreview(false) }, [title])
   const onCloseRef = useRef(onClose)
   useEffect(() => { onCloseRef.current = onClose }, [onClose])
   useEffect(() => {
@@ -4896,9 +4950,9 @@ function MobileSheetView({ title, onClose, children }: { title: string; onClose:
   }, [])
   useEffect(() => { dialogRef.current?.focus() }, [title])
   return (
-    <div className="sheet-layer" role="presentation">
+    <div className={`sheet-layer ${sliderPreview ? 'slider-preview' : ''}`} role="presentation">
       <button className="sheet-scrim" tabIndex={-1} onClick={onClose} aria-label="Close sheet" />
-      <section ref={dialogRef} className="mobile-sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}>
+      <section ref={dialogRef} className="mobile-sheet" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} onPointerDownCapture={(event) => { if (title === 'Properties' && event.target instanceof HTMLInputElement && event.target.type === 'range') setSliderPreview(true) }}>
         <div className="sheet-handle" aria-hidden="true" />
         <header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X /></IconButton></header>
         <div className="sheet-content">{children}</div>
@@ -5052,6 +5106,7 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'knife', label: 'Knife tool', icon: <Scissors /> },
     { id: 'width', label: 'Width tool', icon: <SlidersHorizontal /> },
     { id: 'shape-builder', label: 'Shape builder', icon: <Shapes /> },
+    { id: 'camera-raw', label: 'Camera raw filter', icon: <Camera /> },
     { id: 'pen', label: 'Pen tool', icon: <PenTool /> },
     { id: 'corner', label: 'Corner tool', icon: <Spline /> },
     { id: 'zoom', label: 'Zoom tool', icon: <ZoomIn /> },
@@ -5065,6 +5120,52 @@ function MoreMenu({ onAction }: { onAction: (action: string) => void }) {
     { id: 'export', label: 'Export design', icon: <Download /> },
   ]
   return <div className="more-menu-list">{actions.map((action) => <button key={action.id} onClick={() => onAction(action.id)}>{action.icon}<span>{action.label}</span><ChevronRight /></button>)}</div>
+}
+
+function CameraRawDialog({ layer, layers, onClose, onApply }: { layer: DesignLayer; layers: DesignLayer[]; onClose: () => void; onApply: (settings: CameraRawSettings) => void }) {
+  const [draft, setDraft] = useState<CameraRawSettings>(() => ({ ...DEFAULT_CAMERA_RAW, ...layer.cameraRaw }))
+  const ref = useRef<HTMLElement>(null)
+  const closeRef = useRef(onClose)
+  useEffect(() => { closeRef.current = onClose }, [onClose])
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    ref.current?.focus()
+    const key = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeRef.current(); return }
+      if (event.key !== 'Tab' || !ref.current) return
+      const controls = [...ref.current.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),[tabindex]:not([tabindex="-1"])')].filter((item) => item.getClientRects().length > 0)
+      if (!controls.length) return
+      if (event.shiftKey && (document.activeElement === controls[0] || document.activeElement === ref.current)) { event.preventDefault(); controls[controls.length - 1].focus() }
+      else if (!event.shiftKey && document.activeElement === controls[controls.length - 1]) { event.preventDefault(); controls[0].focus() }
+    }
+    window.addEventListener('keydown', key, true)
+    return () => { window.removeEventListener('keydown', key, true); if (previous?.isConnected) previous.focus() }
+  }, [])
+  const previewLayers = layers.map((item) => ({ ...item, id: item.id === layer.id ? 'camera-raw-preview' : `camera-raw-preview-${item.id}`, ...(item.id === layer.id ? { cameraRaw: draft } : {}) }))
+  const preview = previewLayers.find((item) => item.id === 'camera-raw-preview')!
+  const change = (name: keyof CameraRawSettings, value: number) => setDraft((current) => ({ ...current, [name]: value }))
+  return <div className="dialog-layer camera-raw-layer">
+    <button className="dialog-scrim" aria-label="Cancel camera raw" onClick={onClose} />
+    <section ref={ref} className="camera-raw-dialog" role="dialog" aria-modal="true" aria-label="Camera raw filter" tabIndex={-1}>
+      <header><div><h2>Camera raw filter</h2><p>Preview changes to {layer.name}</p></div><IconButton label="Close camera raw" onClick={onClose}><X /></IconButton></header>
+      <div className="camera-raw-content">
+        <div className="camera-raw-preview"><svg viewBox={`${layer.x} ${layer.y} ${Math.max(1, layer.width)} ${Math.max(1, layer.height)}`} role="img" aria-label="Image adjustment preview"><defs>{previewLayers.map((item) => <LayerDefinition key={item.id} layer={item} />)}{previewLayers.map((item, index) => item.clipToBelow && <mask key={item.id} id={`preview-clip-${item.id}`} maskUnits="userSpaceOnUse" x={layer.x - layer.width * 3} y={layer.y - layer.height * 3} width={Math.max(1, layer.width) * 7} height={Math.max(1, layer.height) * 7} style={{ maskType: 'alpha' }}>{index > 0 && previewLayers[index - 1].visible && <LayerElement layer={clippingBase(previewLayers[index - 1])} clipMask={previewLayers[index - 1].clipToBelow ? `url(#preview-clip-${previewLayers[index - 1].id})` : undefined} onPointerDown={() => {}} onDoubleClick={() => {}} />}</mask>)}</defs><LayerElement layer={preview} clipMask={preview.clipToBelow ? `url(#preview-clip-${preview.id})` : undefined} onPointerDown={() => {}} onDoubleClick={() => {}} /></svg></div>
+        <div className="camera-raw-settings">
+          <SliderField label="Brightness" value={draft.brightness} min={-100} max={100} unit="%" onChange={(value) => change('brightness', value)} />
+          <div className="slider-field"><div><span>Exposure</span><div className="slider-value"><NumericControl label="Exposure value" min={-2} max={2} step={.1} value={draft.exposure} onChange={(value) => change('exposure', value)} /><small>EV</small></div></div><input type="range" aria-label="Exposure" min={-2} max={2} step={.1} value={draft.exposure} onChange={(event) => change('exposure', Number(event.target.value))} /></div>
+          <SliderField label="Vibrance" value={draft.vibrance} min={-100} max={100} unit="%" onChange={(value) => change('vibrance', value)} />
+          <SliderField label="Sharpness" value={draft.sharpness} min={0} max={100} unit="%" onChange={(value) => change('sharpness', value)} />
+          <h3>Curves</h3><p>Adjust the tonal curve at shadows, midtones and highlights.</p>
+          <svg className="camera-raw-curve" viewBox="0 0 100 100" role="img" aria-label={`Tone curve: shadows ${draft.shadows}, midtones ${draft.midtones}, highlights ${draft.highlights}`}><path d="M 0 100 L 100 0" stroke="currentColor" opacity=".25" fill="none"/><polyline points={`0,100 25,${100 - draft.shadows} 50,${100 - draft.midtones} 75,${100 - draft.highlights} 100,0`} fill="none" stroke="#5B4BF0" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg>
+          <SliderField label="Curve shadows" value={draft.shadows} min={0} max={100} unit="%" onChange={(value) => change('shadows', value)} />
+          <SliderField label="Curve midtones" value={draft.midtones} min={0} max={100} unit="%" onChange={(value) => change('midtones', value)} />
+          <SliderField label="Curve highlights" value={draft.highlights} min={0} max={100} unit="%" onChange={(value) => change('highlights', value)} />
+          <p>Vibrance uses an approximate saturation adjustment. This is not Adobe Camera Raw.</p>
+        </div>
+      </div>
+      <footer><button className="button secondary" onClick={() => setDraft({ ...DEFAULT_CAMERA_RAW })}>Reset</button><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" onClick={() => onApply(draft)}>Apply</button></footer>
+    </section>
+  </div>
 }
 
 function PsdImportDialog({ kind, onClose, onImport }: { kind: 'psd' | 'ai'; onClose: () => void; onImport: (name: string, width: number, height: number, image: string) => void }) {
@@ -5161,7 +5262,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
     'Choose New design, select a preset or enter custom width and height. Dimensions accept multiplication such as 1080 * 3. Choose a background and select Create design.',
     'Open PSD on the home screen, or File → Open PSD on desktop / More → Open PSD on a phone. PSD files open as a single flattened image using their saved composite; Photoshop layers, editable text, masks and effects do not remain editable. Save the current design as a Project backup before opening another design.',
     'Open AI on the home screen, or File → Open Illustrator file on desktop / More → Open Illustrator file on a phone. AI files must be saved with Create PDF Compatible File enabled. The first PDF page opens as a flattened image; Illustrator paths and text are not editable. EPS is not supported; export an SVG or PNG from Illustrator instead.',
-    'Designs autosave in browser storage. Save or Ctrl/Cmd+S writes an editable .pocket project file; use File or More → Save project file as to choose another file. Open project file in File or More, or Import project on the home screen, to restore it. Supported browsers can save back to the chosen file during the session; others download a new copy. Browser storage can be cleared, so keep backups.',
+    'Designs autosave in browser storage. Save or Ctrl/Cmd+S writes an editable .pocket project file; use File or More → Save project file as to choose another file. Open project file in File or More, or Import project on the home screen, to restore it. Supported browsers can save back to the chosen file, including after reopening the current design when the browser retains access; others download a new copy. Browser storage can be cleared, so keep backups.',
     'Use Manage artboards from More on a phone or the artboard controls on desktop to add, switch or delete artboards. On touch, long-press an artboard to open the artboard list. Deleting an artboard removes its layers.'
   ] },
   { title: 'Select, move, resize and zoom', keywords: 'transform select rotation handle pinch pan corners proportions', paragraphs: [
@@ -5175,7 +5276,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
     'With adjacent opaque solid-filled vector shapes selected, choose Shape builder. Drag across highlighted regions, choose Merge or Remove, then Apply. On the keyboard, focus the artboard, use arrows (Shift for larger steps) and Enter to toggle regions. Cancel leaves the sources unchanged.',
     'With multiple shapes selected, Unite, Subtract, Intersect and Exclude create a compound path. Subtract removes upper selected shapes from the lowest selected shape. Curves are approximated, and the operation replaces its inputs; Undo restores them.',
     'For a blend, select two matching solid-colour shapes, set Steps and choose Create blend. The intermediate shapes are separate editable layers; editing an endpoint does not regenerate them. Masks, effects, images and text are not supported by this blend.',
-    'Select Clip to clip an object to the layer directly below it. Reordering changes which layer is below. Duplicate, delete, alignment and arrangement controls are available in the layer or object actions.'
+    'Select Clip to clip an object to the layer directly below it. Reordering changes which layer is below. For filled shapes the clipping base excludes their decorative stroke, blur and layer effects. Duplicate, delete, alignment and arrangement controls are available in the layer or object actions.'
   ] },
   { title: 'Text and fonts', keywords: 'type edit typography alignment bold italic justify install font', paragraphs: [
     'Choose Text and place it on the canvas. Select text once to transform it; double-tap or double-click it to edit its contents. On a phone, use Edit text or Done to enter or finish editing.',
@@ -5187,6 +5288,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
     'Use colour controls to choose a colour or sample one from the canvas. Properties also provide alignment, blend and blur effects where supported. Image palette extracts colours from a selected image.'
   ] },
   { title: 'Images, crop and masks', keywords: 'image import photo crop mask brush clipping polygon magic wand feather tolerance', paragraphs: [
+    'Use Image to place a local image. Select it and choose Camera raw filter from the desktop tool rail or mobile image toolbar / More menu. Adjust brightness, exposure, vibrance, sharpness and a three-point tonal curve in the preview. Apply saves editable adjustments; Cancel discards them. Vibrance is an approximate saturation adjustment, and the filter is not Adobe Camera Raw.',
     'Use Image to place a local image. Select it to access Crop, Mask shape, Polygonal, Magic wand and Mask brush. Crop moves the image inside its mask; Mask shape chooses a rectangular, rounded, elliptical or star boundary.',
     'Polygonal selection: tap around the region, choose Keep selection or Mask selection out, then Apply selection. Magic wand: set tolerance and feather, choose an action, then tap a colour in the image. The wand selects contiguous similar colours; it is not AI background removal.',
     'Mask brush works on a selected object. Use Hide to conceal and Restore to reveal; adjust size, hardness, opacity and flow. In Layers, tapping a mask thumbnail reopens mask editing. Masks do not permanently erase the original object.'
@@ -5250,6 +5352,7 @@ interface ExportDialogProps {
   guides: CanvasGuide[]
   onClose: () => void
   onSuccess: (message: string) => void
+  onProjectExport: (name: string) => Promise<'saved' | 'downloaded' | 'cancelled' | 'error'>
 }
 
 function ExportDialog(props: ExportDialogProps) {
@@ -5278,12 +5381,19 @@ function ExportDialog(props: ExportDialogProps) {
     setExporting(true)
     setExportError('')
     try {
+      if (format === 'PROJECT') {
+        const result = await props.onProjectExport(fileName)
+        if (result === 'cancelled') { setExporting(false); return }
+        if (result === 'error') { setExportError('Could not save the project file. Check file permissions and try again.'); setExporting(false); return }
+        props.onSuccess(result === 'saved' ? 'Project saved. Save will update this file.' : 'Project downloaded. This browser cannot update it directly.')
+        return
+      }
       await exportDesign({
         format, scale, transparent, quality, fileName,
         documentMeta: props.documentMeta, layers: props.layers, artboards: props.artboards,
         carousel: carouselActive ? { axis: carouselAxis, count: carouselCount, boundaries: sliceSource === 'guides' ? boundaries : undefined, width: slideWidth, height: slideHeight } : undefined,
       })
-      props.onSuccess(carouselActive ? `${slideCount} carousel slides exported` : `${format === 'PROJECT' ? 'Project' : format} exported`)
+      props.onSuccess(carouselActive ? `${slideCount} carousel slides exported` : `${format} exported`)
     } catch (error) {
       console.error(error)
       setExportError(error instanceof Error ? error.message : 'Export failed. Check that the project fonts are available and try again.')
@@ -5307,6 +5417,7 @@ function ExportDialog(props: ExportDialogProps) {
             ))}
           </div>
           <label className="export-field"><span>File name</span><div><input value={fileName} onChange={(event) => setFileName(event.target.value)} /><small>.{carouselActive ? 'zip' : format === 'PROJECT' ? 'pocket' : format.toLowerCase()}</small></div></label>
+          {format === 'PROJECT' && <p className="project-save-note">On supported browsers, choose a file to update it with Save. Permission may be requested again. Otherwise, a copy is downloaded each time.</p>}
           {format !== 'SVG' && format !== 'PROJECT' && !carouselActive && (
             <div className="export-row"><span>Scale</span><div className="segmented scale-control">{[1, 2, 3].map((item) => <button key={item} className={scale === item ? 'selected' : ''} onClick={() => setScale(item)}>{item}×</button>)}</div></div>
           )}
@@ -5354,12 +5465,7 @@ async function exportDesign(options: ExportOptions) {
     if (layer.type !== 'image' || !layer.src || layer.src.startsWith('data:')) return layer
     try { return { ...layer, src: await imageToDataUrl(layer.src) } } catch { return layer }
   }))
-  if (options.format === 'PROJECT') {
-    const embeddedArtboards = await Promise.all(options.artboards.map(async (artboard) => ({ ...artboard, layers: await embedImages(artboard.layers) })))
-    const payload = JSON.stringify({ version: 2, name: safeName, document: embeddedArtboards[0].document, layers: embeddedArtboards[0].layers, artboards: embeddedArtboards }, null, 2)
-    downloadBlob(new Blob([payload], { type: 'application/json' }), `${safeName}.pocket`)
-    return
-  }
+  if (options.format === 'PROJECT') throw new Error('Use the project file save workflow.')
   const embeddedLayers = await embedImages(options.layers)
   const includeBackground = options.format !== 'PNG' || !options.transparent
   await ensureLayerFonts(embeddedLayers)
@@ -5504,6 +5610,7 @@ function embeddedFontCss(layers: DesignLayer[]) {
 function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground: boolean) {
   const defs = `<style>${embeddedFontCss(layers)}</style>` + layers.map((layer) => {
     let definition = ''
+    if (layer.type === 'image' && layer.cameraRaw) definition += `<filter id="raw-${layer.id}" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">${cameraRawMarkup(layer.cameraRaw)}</filter>`
     if (hasEffects(layer)) { const bounds = effectBounds(layer); definition += `<filter id="fx-${layer.id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" color-interpolation-filters="sRGB">${effectMarkup(layer)}</filter>` }
     layer.maskSelections?.forEach((selection, index) => {
       const id = `${layer.id}-${index}`
@@ -5544,11 +5651,12 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     if (layer.clipToBelow) {
       const below = layers[index - 1]
       const extent = Math.max(meta.width, meta.height, ...layers.map((item) => Math.max(Math.abs(item.x), Math.abs(item.y)) + Math.hypot(item.width, item.height) + Math.abs(item.strokeWidth))) * 2 + 100
-      definition += `<mask id="layer-clip-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${-extent}" y="${-extent}" width="${meta.width + extent * 2}" height="${meta.height + extent * 2}" style="mask-type:alpha">${below?.visible ? `<use href="#export-layer-${below.id}"/>` : ''}</mask>`
+      definition += `<mask id="layer-clip-${layer.id}" maskUnits="userSpaceOnUse" maskContentUnits="userSpaceOnUse" x="${-extent}" y="${-extent}" width="${meta.width + extent * 2}" height="${meta.height + extent * 2}" style="mask-type:alpha">${below?.visible ? `<use href="#export-clip-base-${below.id}"/>` : ''}</mask>`
     }
     return definition
   }).join('')
-  const body = layers.filter((layer) => layer.visible && !layer.isEmpty).map((layer) => {
+  const renderExportLayer = (layer: DesignLayer, maskSource = false) => {
+    if (maskSource) layer = clippingBase(layer)
     const cx = layer.x + layer.width / 2
     const cy = layer.y + layer.height / 2
     const transform = layerTransform(layer)
@@ -5557,10 +5665,11 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const stroke = layerStroke(layer)
     const dash = strokeDashArray(layer) ? ` stroke-dasharray="${strokeDashArray(layer)}"${layer.strokeDash === 'dotted' && layer.type !== 'line' && layer.type !== 'path' && layer.type !== 'brush' ? ' stroke-linecap="round"' : ''}` : ''
     const wrap = (element: string) => {
-      const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${element}</g>`
+      const adjusted = layer.type === 'image' && layer.cameraRaw ? `<g filter="url(#raw-${layer.id})">${element}</g>` : element
+      const source = `<g transform="${transform}"${layer.maskStrokes?.length || layer.maskSelections?.length ? ` mask="url(#paint-mask-${layer.id})"` : ''}>${adjusted}</g>`
       const samples = blurSamples(layer)
       const filtered = layer.blur?.enabled && layer.blur.type === 'gaussian' ? `<g filter="url(#blur-${layer.id})">${source}</g>` : samples.length ? samples.map((sample) => `<g transform="${sample.transform}" opacity="${sample.opacity}" style="mix-blend-mode:plus-lighter">${source}</g>`).join('') : source
-      return `<g id="export-layer-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${hasEffects(layer) ? `<g filter="url(#fx-${layer.id})">${filtered}</g>` : filtered}</g>`
+      return `<g id="${maskSource ? 'export-clip-base' : 'export-layer'}-${layer.id}"${layer.clipToBelow ? ` mask="url(#layer-clip-${layer.id})"` : ''} style="isolation:isolate;mix-blend-mode:${layer.blendMode || 'normal'}">${hasEffects(layer) ? `<g filter="url(#fx-${layer.id})">${filtered}</g>` : filtered}</g>`
     }
     if (layer.paintStrokes) return wrap(`<g opacity="${opacity}">${layer.paintStrokes.map((stroke, index) => maskStrokeSvg(layer, stroke, `soft-paint-${escapeXml(layer.id)}-${index}`, stroke.color)).join('')}</g>`)
     if (layer.type === 'rectangle') return wrap(`<rect x="${layer.x}" y="${layer.y}" width="${layer.width}" height="${layer.height}" rx="${layer.radius || 0}" fill="${fill}" stroke="${stroke}" stroke-width="${layer.strokeWidth}"${dash} opacity="${opacity}"/>`)
@@ -5585,8 +5694,12 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
     const x = layer.textAlign === 'center' ? layer.x + layer.width / 2 : layer.textAlign === 'right' ? layer.x + layer.width : layer.x
     const anchor = layer.textAlign === 'center' ? 'middle' : layer.textAlign === 'right' ? 'end' : 'start'
     return wrap(`<text xml:space="preserve" x="${x}" y="${layer.y + fontSize * 0.84}" transform="translate(${x} 0) scale(${layer.textScaleX || 1} 1) translate(${-x} 0)" fill="${fill}" font-family="${escapeXml(layer.fontFamily || 'Inter')}" font-size="${fontSize}" font-weight="${layer.fontWeight || 400}" font-style="${layer.fontStyle || 'normal'}" text-decoration="${layer.underline ? 'underline' : 'none'}" letter-spacing="${layer.letterSpacing || 0}" text-anchor="${anchor}" opacity="${opacity}">${textLineDetails(layer).map((line, index) => { const words = layer.textAlign === 'justify' && !line.last ? justifiedWords(layer, line.text) : []; return `<tspan x="${x}" dy="${index === 0 ? 0 : fontSize * (layer.lineHeight ?? 1.2)}">${words.length ? words.map((word) => `<tspan x="${x + word.offset}">${escapeXml(word.text)}</tspan>`).join('') : escapeXml(line.text)}</tspan>` }).join('')}</text>`)
-  }).join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}</defs>${includeBackground ? `<rect width="${meta.width}" height="${meta.height}" fill="${meta.background}"/>` : ''}${body}</svg>`
+  }
+  const visible = layers.filter((layer) => layer.visible && !layer.isEmpty)
+  const baseIds = new Set(layers.flatMap((layer, index) => layer.clipToBelow && index > 0 ? [layers[index - 1].id] : []))
+  const bases = visible.filter((layer) => baseIds.has(layer.id)).map((layer) => renderExportLayer(layer, true)).join('')
+  const body = visible.map((layer) => renderExportLayer(layer)).join('')
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${meta.width}" height="${meta.height}" viewBox="0 0 ${meta.width} ${meta.height}"><defs>${defs}${bases}</defs>${includeBackground ? `<rect width="${meta.width}" height="${meta.height}" fill="${meta.background}"/>` : ''}${body}</svg>`
 }
 
 function HomeScreen({ theme, onToggleTheme, onNew, onHelp, onOpenPsd, onOpenAi, onImport, onOpenSample, onOpenCurrent, currentName, hasCurrent }: {
