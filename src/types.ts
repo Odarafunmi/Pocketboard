@@ -20,6 +20,7 @@ export type Tool =
   | 'knife'
   | 'width'
   | 'shape-builder'
+  | 'camera-raw'
 
 export type LayerType = 'rectangle' | 'ellipse' | 'polygon' | 'text' | 'image' | 'star' | 'line' | 'path' | 'brush'
 
@@ -70,6 +71,8 @@ export interface StoredFont { id: string; label: string; assets: FontAsset[] }
 export type FxKind = 'dropShadow' | 'innerGlow' | 'outerGlow' | 'bevel'
 export interface LayerEffect { enabled: boolean; color: string; opacity: number; size: number; angle: number; distance: number }
 export type LayerEffects = Partial<Record<FxKind, LayerEffect>>
+
+export interface CameraRawSettings { brightness: number; exposure: number; vibrance: number; sharpness: number; shadows: number; midtones: number; highlights: number }
 
 export interface DesignLayer {
   id: string
@@ -128,6 +131,7 @@ export interface DesignLayer {
   flipY?: boolean
   blur?: LayerBlur
   effects?: LayerEffects
+  cameraRaw?: CameraRawSettings
   blendMode?: 'normal' | 'multiply' | 'screen' | 'overlay'
 }
 
