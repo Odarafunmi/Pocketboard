@@ -32,6 +32,7 @@ export interface Point {
 export interface GradientStop {
   offset: number
   color: string
+  opacity?: number
 }
 
 export interface GradientFill {
@@ -77,6 +78,8 @@ export interface CameraRawSettings { brightness: number; exposure: number; vibra
 export interface DesignLayer {
   id: string
   name: string
+  groupId?: string
+  groupName?: string
   type: LayerType
   x: number
   y: number
