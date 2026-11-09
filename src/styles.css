@@ -4981,3 +4981,10 @@ button:disabled {
 @media (max-width: 599px) { .camera-raw-content { display: flex; flex-direction: column; } .camera-raw-preview { flex: 0 0 180px; } .camera-raw-preview svg { max-height: 180px; } .camera-raw-settings { overflow: visible; } }
 .camera-raw-curve { display: block; width: min(100%, 180px); height: auto; border: 1px solid var(--border); background: var(--surface-input); color: var(--text-secondary); margin: 8px auto; }
 .project-save-note { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.layer-name-input { flex: 1 1 auto; min-width: 30px; width: 100%; color: var(--text-primary); background: var(--surface-input); border: 1px solid var(--accent); border-radius: 4px; padding: 4px; font: inherit; }
+.layer-groups { display: flex; flex-direction: column; gap: 4px; padding: 4px 8px; }
+.layer-groups > div { display: flex; align-items: center; gap: 4px; }
+.layer-groups button { min-height: 40px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text-primary); padding: 4px 8px; font: inherit; }
+.layer-groups button:first-child { flex: 1; display: flex; align-items: center; gap: 6px; text-align: left; }
+.layer-group-label { color: var(--text-secondary); font-size: 11px; }
+.multi-transform-banner { top: auto; bottom: 12px; }

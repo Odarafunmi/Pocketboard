@@ -55,6 +55,7 @@ import {
   Move,
   Palette,
   PenTool,
+  Pencil,
   Pipette,
   Plus,
   Redo2,
@@ -813,6 +814,45 @@ function App() {
     } catch (error) { showToast(error instanceof Error ? error.message : 'Could not build selected regions.') }
   }
 
+  const adjustMultiTransform = (scale: number, angleDegrees: number) => {
+    const current = layersRef.current, selected = current.filter((layer) => selectedIds.includes(layer.id))
+    if (selected.length < 2 || selected.some((layer) => layer.locked || !layer.visible || layer.isEmpty)) { showToast('Select visible, unlocked layers to transform.'); return }
+    const points = selected.flatMap((layer) => {
+      const cx = layer.x + layer.width/2, cy = layer.y + layer.height/2, radians = layer.rotation * Math.PI/180
+      return [[-1,-1],[1,-1],[1,1],[-1,1]].map(([x,y]) => ({ x: cx + x*layer.width/2*Math.cos(radians) - y*layer.height/2*Math.sin(radians), y: cy + x*layer.width/2*Math.sin(radians) + y*layer.height/2*Math.cos(radians) }))
+    })
+    const cx = (Math.min(...points.map((p) => p.x)) + Math.max(...points.map((p) => p.x))) / 2, cy = (Math.min(...points.map((p) => p.y)) + Math.max(...points.map((p) => p.y))) / 2
+    const angle = angleDegrees * Math.PI/180
+    commitLayers(current.map((layer) => {
+      if (!selectedIds.includes(layer.id)) return layer
+      const x = layer.x + layer.width/2 - cx, y = layer.y + layer.height/2 - cy
+      const newX = cx + (x*Math.cos(angle)-y*Math.sin(angle))*scale, newY = cy + (x*Math.sin(angle)+y*Math.cos(angle))*scale
+      const width = layer.width*scale, height = layer.height*scale
+      return { ...layer, x: newX-width/2, y: newY-height/2, width, height, rotation: layer.rotation + angleDegrees, ...(layer.type === 'text' && scale !== 1 ? { fontSize: (layer.fontSize || 32)*scale, ...(layer.letterSpacing !== undefined ? { letterSpacing: layer.letterSpacing*scale } : {}) } : {}) }
+    }))
+  }
+
+  const groupSelected = () => {
+    const current = layersRef.current, chosen = current.filter((layer) => selectedIds.includes(layer.id))
+    if (chosen.length < 2 || chosen.some((layer) => layer.locked || layer.groupId)) { showToast('Select two or more unlocked, ungrouped layers.'); return }
+    const groupId = makeId(), groupName = `Group ${new Set(current.map((layer) => layer.groupId).filter(Boolean)).size + 1}`
+    commitLayers(current.map((layer) => selectedIds.includes(layer.id) ? { ...layer, groupId, groupName } : layer), 'Layers grouped')
+    setMultiSelectMode(false); setMobileSheet(null); setActiveTool('select')
+  }
+
+  const ungroupLayers = (groupId: string) => {
+    const current = layersRef.current
+    const members = current.filter((layer) => layer.groupId === groupId)
+    if (members.some((layer) => layer.locked)) { showToast('Unlock the group layers first.'); return }
+    commitLayers(current.map((layer) => layer.groupId === groupId ? { ...layer, groupId: undefined, groupName: undefined } : layer), 'Layers ungrouped')
+  }
+  const selectGroup = (groupId: string) => {
+    const members = layersRef.current.filter((layer) => layer.groupId === groupId)
+    if (!members.length) return
+    const ids = members.map((layer) => layer.id)
+    setMultiIds(ids); selectedIdRef.current = ids[ids.length - 1]; setSelectedId(ids[ids.length - 1]); setMultiSelectMode(false); setActiveTool('select'); setMobileSheet(null)
+  }
+
   const createBlend = () => {
     const current = layersRef.current
     const chosen = current.filter((layer) => selectedIds.includes(layer.id))
@@ -841,7 +881,7 @@ function App() {
     if (!selectedId) return
     const layer = layersRef.current.find((item) => item.id === selectedId)
     if (!layer) return
-    const duplicate = { ...layer, id: makeId(), name: `${layer.name} copy`, x: layer.x + 24, y: layer.y + 24 }
+    const duplicate = { ...layer, groupId: undefined, groupName: undefined, id: makeId(), name: `${layer.name} copy`, x: layer.x + 24, y: layer.y + 24 }
     commitLayers([...layersRef.current, duplicate], 'Layer duplicated')
     setSelectedId(duplicate.id)
   }, [commitLayers, selectedId])
@@ -1092,7 +1132,7 @@ function App() {
         if (layer) clipboardRef.current = { ...layer }
       } else if (command && event.key.toLowerCase() === 'v' && clipboardRef.current) {
         event.preventDefault()
-        const pasted = { ...clipboardRef.current, id: makeId(), name: `${clipboardRef.current.name} copy`, x: clipboardRef.current.x + 24, y: clipboardRef.current.y + 24 }
+        const pasted = { ...clipboardRef.current, groupId: undefined, groupName: undefined, id: makeId(), name: `${clipboardRef.current.name} copy`, x: clipboardRef.current.x + 24, y: clipboardRef.current.y + 24 }
         commitLayers([...layersRef.current, pasted])
         setSelectedId(pasted.id)
       } else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId) {
@@ -1305,10 +1345,10 @@ function App() {
   }
 
   const selected = layers.find((layer) => layer.id === selectedId) || null
-  const showQuickStyle = isCompact && !multiSelectMode && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
+  const showQuickStyle = isCompact && !multiSelectMode && selectedIds.length === 1 && !['pen', 'brush', 'paint-brush', 'polygon-mask', 'wand-mask', 'knife', 'width', 'shape-builder'].includes(activeTool) && selected && selected.id === quickStyleId && !selected.locked
   const showBrushOptions = isCompact && ((activeTool === 'brush' && Boolean(selected)) || activeTool === 'paint-brush')
   const showSelectionOptions = isCompact && !multiSelectMode && (activeTool === 'polygon-mask' || activeTool === 'wand-mask')
-  const showMultiOptions = isCompact && multiSelectMode
+  const showMultiOptions = isCompact && (multiSelectMode || selectedIds.length > 1)
   const showKnifeOptions = isCompact && (activeTool === 'knife' || activeTool === 'width' || activeTool === 'shape-builder')
   const showPenOptions = isCompact && activeTool === 'pen' && !multiSelectMode
   const handleMobileToolAction = (action: MobileToolAction) => {
@@ -1457,6 +1497,8 @@ function App() {
             onDeleteLayer={(id) => { const current = layersRef.current; const target = current.find((layer) => layer.id === id); if (target && !target.locked) commitLayers(current.filter((layer) => layer.id !== id), 'Layer deleted') }}
             onMoveUp={() => reorderSelected('up')}
             onMoveDown={() => reorderSelected('down')}
+            onRenameLayer={(id, name) => updateLayer(id, { name })}
+            onSelectGroup={selectGroup} onUngroup={ungroupLayers}
             onReorder={reorderLayersFromPanel}
           />
         </aside>
@@ -1487,7 +1529,8 @@ function App() {
             onAdd={addArtboard}
             onDelete={() => deleteArtboard()}
           />
-          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection actions"><span>{selectedIds.length} selected</span>{selectedIds.length >= 2 && <><button onClick={startShapeBuilder}>Shape builder</button><button onClick={() => buildShapes('union')}>Unite</button><button title="Subtract upper selected shapes from the lowest" onClick={() => buildShapes('difference')}>Subtract</button><button onClick={() => buildShapes('intersection')}>Intersect</button><button onClick={() => buildShapes('xor')}>Exclude</button>{selectedIds.length === 2 && <><label className="blend-count">Steps <NumericControl label="Blend steps" min={1} max={50} step={1} value={blendSteps} onChange={(value) => setBlendSteps(Math.round(value))} /></label><button onClick={createBlend}>Create blend</button></>}</>}<button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
+          {multiSelectMode && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection actions"><span>{selectedIds.length} selected</span>{selectedIds.length >= 2 && <><button onClick={groupSelected}>Group layers</button><button onClick={() => adjustMultiTransform(.9, 0)}>Scale down</button><button onClick={() => adjustMultiTransform(1.1, 0)}>Scale up</button><button onClick={() => adjustMultiTransform(1, -15)}>Rotate left</button><button onClick={() => adjustMultiTransform(1, 15)}>Rotate right</button><button onClick={startShapeBuilder}>Shape builder</button><button onClick={() => buildShapes('union')}>Unite</button><button title="Subtract upper selected shapes from the lowest" onClick={() => buildShapes('difference')}>Subtract</button><button onClick={() => buildShapes('intersection')}>Intersect</button><button onClick={() => buildShapes('xor')}>Exclude</button>{selectedIds.length === 2 && <><label className="blend-count">Steps <NumericControl label="Blend steps" min={1} max={50} step={1} value={blendSteps} onChange={(value) => setBlendSteps(Math.round(value))} /></label><button onClick={createBlend}>Create blend</button></>}</>}<button onClick={() => setMultiSelectMode(false)}>Done selecting</button></div></div>}
+          {!multiSelectMode && selectedIds.length > 1 && <div className={isCompact ? 'quick-style-wrap multi-mode-compact' : 'multi-mode-banner multi-transform-banner'}><div className={isCompact ? 'quick-style' : 'multi-actions'} role="toolbar" aria-label="Multiple selection transforms"><span>{selectedIds.length} selected</span><button onClick={groupSelected}>Group layers</button><button onClick={() => adjustMultiTransform(.9, 0)}>Scale down</button><button onClick={() => adjustMultiTransform(1.1, 0)}>Scale up</button><button onClick={() => adjustMultiTransform(1, -15)}>Rotate left</button><button onClick={() => adjustMultiTransform(1, 15)}>Rotate right</button></div></div>}
           {showQuickStyle && <QuickStyleToolbar
             layer={selected}
             onUpdate={(patch) => editingTextId === selected.id ? updateTextEditing(selected.id, patch) : updateSelection(patch)}
@@ -1675,6 +1718,8 @@ function App() {
               onDeleteLayer={(id) => { const current = layersRef.current; const target = current.find((layer) => layer.id === id); if (target && !target.locked) commitLayers(current.filter((layer) => layer.id !== id), 'Layer deleted') }}
               onMoveUp={() => reorderSelected('up')}
               onMoveDown={() => reorderSelected('down')}
+              onRenameLayer={(id, name) => updateLayer(id, { name })}
+              onSelectGroup={selectGroup} onUngroup={ungroupLayers}
               onReorder={reorderLayersFromPanel}
               insideSheet
             />
@@ -2022,6 +2067,9 @@ interface LayersPanelProps {
   onStartMulti: (id: string) => void
   onClearSelection: () => void
   onModifyLayer: (id: string) => void
+  onRenameLayer: (id: string, name: string) => void
+  onSelectGroup: (id: string) => void
+  onUngroup: (id: string) => void
   maskEditingId: string | null
   onSelect: (id: string) => void
   onEditMask: (id: string) => void
@@ -2042,6 +2090,8 @@ interface LayersPanelProps {
 
 function LayersPanel(props: LayersPanelProps) {
   const [query, setQuery] = useState('')
+  const [renameId, setRenameId] = useState<string | null>(null)
+  const [renameDraft, setRenameDraft] = useState('')
   const [panelTab, setPanelTab] = useState<'layers' | 'assets'>('layers')
   const [rowMenu, setRowMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [dragOrder, setDragOrder] = useState<string[] | null>(null)
@@ -2205,6 +2255,7 @@ function LayersPanel(props: LayersPanelProps) {
         <button disabled={!props.selectedIds.length} onClick={props.onClearSelection}>Clear</button>
         {props.multiSelectMode && <button onClick={() => props.onMultiSelectMode(false)}>Done selecting</button>}
       </div>
+      {(() => { const groups = [...new Set(props.layers.map((layer) => layer.groupId).filter((id): id is string => Boolean(id)))]; return groups.length > 0 && <div className="layer-groups" aria-label="Layer groups">{groups.map((id) => { const members = props.layers.filter((layer) => layer.groupId === id); return <div key={id}><button onClick={() => props.onSelectGroup(id)}><Layers3 size={15} />{members[0].groupName || 'Group'} <span>({members.length})</span></button><button aria-label={`Ungroup ${members[0].groupName || 'Group'}`} onClick={() => props.onUngroup(id)}>Ungroup</button></div> })}</div> })()}
       <div className="layer-order-hint"><GripVertical size={12} /><span>{query ? 'Clear search to reorder' : 'Drag layers to reorder'}</span></div>
       <div ref={listRef} className={`layer-list ${draggingId ? 'is-reordering' : ''}`} role="listbox" aria-label="Canvas layers" aria-multiselectable={props.multiSelectMode}>
         {visibleLayers.length ? visibleLayers.map((layer) => (
@@ -2252,7 +2303,8 @@ function LayersPanel(props: LayersPanelProps) {
             ><GripVertical size={14} /></button>
             <LayerThumbnail layer={layer} />
             {(layer.maskCreated || Boolean(layer.maskStrokes?.length || layer.maskSelections?.length)) && <button className={`mask-thumbnail ${props.maskEditingId === layer.id ? 'active' : ''}`} aria-pressed={props.maskEditingId === layer.id} aria-label={`Edit mask for ${layer.name}`} title="Edit mask" onClick={(event) => { event.stopPropagation(); props.onEditMask(layer.id) }}><MaskThumbnail layer={layer} /></button>}
-            <span className="layer-name">{layer.clipToBelow ? '↳ ' : ''}{layer.name}</span>
+            {renameId === layer.id ? <input className="layer-name-input" aria-label="Layer name" autoFocus value={renameDraft} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => { const name = renameDraft.trim(); if (name && name !== layer.name) props.onRenameLayer(layer.id, name); setRenameId(null) }} onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') event.currentTarget.blur(); else if (event.key === 'Escape') { setRenameId(null) } }} /> : <span className="layer-name">{layer.clipToBelow ? '↳ ' : ''}{layer.name}{layer.groupId && <small className="layer-group-label"> · {layer.groupName || 'Group'}</small>}</span>}
+            <button className="row-action rename-layer" aria-label={`Rename ${layer.name}`} title="Rename layer" onClick={(event) => { event.stopPropagation(); setRenameDraft(layer.name); setRenameId(layer.id) }}><Pencil size={14} /></button>
             {layer.blur && <button className={`row-action blur-toggle ${layer.blur.enabled ? 'is-active' : ''}`} aria-label={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur for ${layer.name}`} aria-pressed={layer.blur.enabled} title={`${layer.blur.enabled ? 'Disable' : 'Enable'} blur`} onClick={(event) => { event.stopPropagation(); props.onToggleBlur(layer) }}><Sparkles size={14} /></button>}
             <button className="row-action" aria-label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`} onClick={(event) => { event.stopPropagation(); props.onToggleVisible(layer) }}>
               {layer.visible ? <Eye size={15} /> : <EyeOff size={15} />}
@@ -2813,6 +2865,61 @@ function Canvas(props: CanvasProps) {
     } catch { /* the browser may already have released it */ }
   }
 
+  const selectedForTransform = props.layers.filter((layer) => props.selectedIds.includes(layer.id))
+  const multiBounds = (() => {
+    if (selectedForTransform.length < 2 || selectedForTransform.some((layer) => layer.locked || !layer.visible || layer.isEmpty)) return null
+    const points = selectedForTransform.flatMap((layer) => {
+      const cx = layer.x + layer.width / 2, cy = layer.y + layer.height / 2, angle = layer.rotation * Math.PI / 180
+      return [[-1,-1], [1,-1], [1,1], [-1,1]].map(([x,y]) => ({ x: cx + x * layer.width / 2 * Math.cos(angle) - y * layer.height / 2 * Math.sin(angle), y: cy + x * layer.width / 2 * Math.sin(angle) + y * layer.height / 2 * Math.cos(angle) }))
+    })
+    const minX = Math.min(...points.map((point) => point.x)), minY = Math.min(...points.map((point) => point.y)), maxX = Math.max(...points.map((point) => point.x)), maxY = Math.max(...points.map((point) => point.y))
+    return { ...selectedForTransform[0], id: 'multi-bounds', type: 'rectangle' as const, x: minX, y: minY, width: Math.max(1,maxX-minX), height: Math.max(1,maxY-minY), rotation: 0, flipX: false, flipY: false }
+  })()
+
+  const startMultiTransform = (event: ReactPointerEvent, mode: 'resize' | 'rotate', handle?: ResizeHandle) => {
+    if (!multiBounds || pinchRef.current || (event.pointerType === 'touch' && touchPointersRef.current.size > 1)) return
+    event.preventDefault(); event.stopPropagation(); transformCleanupRef.current?.()
+    const snapshot = cloneLayers(layersRef.current), ids = new Set(props.selectedIds), pointerId = event.pointerId
+    const target = event.currentTarget as Element
+    try { target.setPointerCapture(pointerId) } catch { /* window listeners are the fallback */ }
+    const localPoint = (x: number, y: number) => { const rect = props.artboardRef.current!.getBoundingClientRect(); return { x: (x - rect.left) * props.documentMeta.width / rect.width, y: (y - rect.top) * props.documentMeta.height / rect.height } }
+    const start = localPoint(event.clientX,event.clientY), center = { x: multiBounds.x + multiBounds.width / 2, y: multiBounds.y + multiBounds.height / 2 }
+    const anchor = { x: handle?.includes('w') ? multiBounds.x + multiBounds.width : multiBounds.x, y: handle?.includes('n') ? multiBounds.y + multiBounds.height : multiBounds.y }
+    const handlePoint = { x: handle?.includes('w') ? multiBounds.x : multiBounds.x + multiBounds.width, y: handle?.includes('n') ? multiBounds.y : multiBounds.y + multiBounds.height }
+    const vx = handlePoint.x - anchor.x, vy = handlePoint.y - anchor.y
+    let moved = false, done = false
+    const onMove = (next: PointerEvent) => {
+      if (next.pointerId !== pointerId || pinchRef.current) return
+      next.preventDefault()
+      const point = localPoint(next.clientX,next.clientY), dx = point.x - start.x, dy = point.y - start.y
+      moved ||= Math.hypot(dx,dy) > .5
+      const scale = mode === 'resize' ? Math.max(.05, 1 + (dx * vx + dy * vy) / (vx * vx + vy * vy)) : 1
+      const angle = mode === 'rotate' ? Math.atan2(point.y-center.y,point.x-center.x) - Math.atan2(start.y-center.y,start.x-center.x) : 0
+      const transformed = snapshot.map((item) => {
+        if (!ids.has(item.id)) return item
+        const cx = item.x + item.width / 2, cy = item.y + item.height / 2
+        const nextCx = mode === 'resize' ? anchor.x + (cx - anchor.x) * scale : center.x + (cx-center.x)*Math.cos(angle) - (cy-center.y)*Math.sin(angle)
+        const nextCy = mode === 'resize' ? anchor.y + (cy - anchor.y) * scale : center.y + (cx-center.x)*Math.sin(angle) + (cy-center.y)*Math.cos(angle)
+        const width = item.width * scale, height = item.height * scale
+        return { ...item, x: nextCx-width/2, y: nextCy-height/2, width, height, rotation: item.rotation + angle * 180 / Math.PI, ...(item.type === 'text' && mode === 'resize' ? { fontSize: (item.fontSize || 32) * scale, ...(item.letterSpacing !== undefined ? { letterSpacing: item.letterSpacing * scale } : {}) } : {}) }
+      })
+      props.onRestoreSelection(transformed)
+    }
+    function finish(commit: boolean) {
+      if (done) return
+      done = true
+      if (moved && commit) props.onCommitSnapshot(snapshot); else if (!commit) props.onRestoreSelection(snapshot)
+      try { if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId) } catch { /* already released */ }
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); window.removeEventListener('pointercancel', onCancel)
+      if (transformCleanupRef.current === cancel) transformCleanupRef.current = null
+    }
+    function onUp(next: PointerEvent) { if (next.pointerId === pointerId) finish(true) }
+    function onCancel(next: PointerEvent) { if (next.pointerId === pointerId) finish(false) }
+    function cancel() { finish(false) }
+    transformCleanupRef.current = cancel
+    window.addEventListener('pointermove', onMove, { passive: false }); window.addEventListener('pointerup', onUp); window.addEventListener('pointercancel', onCancel)
+  }
+
   const startTransform = (event: ReactPointerEvent, layer: DesignLayer, mode: TransformState['mode'], handle?: TransformState['handle']) => {
     const allowed = (props.activeTool === 'select' && ['move', 'resize', 'rotate'].includes(mode))
       || (props.activeTool === 'corner' && mode === 'corner')
@@ -3368,6 +3475,7 @@ function Canvas(props: CanvasProps) {
           {draftPoints.length > 0 && (props.activeTool === 'brush' || props.activeTool === 'paint-brush') && <g className="mask-brush-preview" pointerEvents="none"><MaskStrokeElement layer={{ id: 'preview', name: '', type: 'path', x: 0, y: 0, width: props.documentMeta.width, height: props.documentMeta.height, rotation: 0, opacity: 1, visible: true, locked: false, fill: 'none', stroke: 'none', strokeWidth: 0 }} stroke={{ points: draftPoints.map((point) => ({ x: point.x / props.documentMeta.width, y: point.y / props.documentMeta.height })), size: props.maskBrushSize / Math.max(1, props.documentMeta.width, props.documentMeta.height), mode: props.maskBrushMode, opacity: props.maskBrushOpacity / 100, flow: props.maskBrushFlow / 100, hardness: props.brushHardness / 100 }} paintColor={props.activeTool === 'paint-brush' ? props.paintColor : props.maskBrushMode === 'hide' ? '#FF2D87' : '#12A150'} /></g>}
           {draftPoints.length > 0 && props.activeTool === 'pen' && <g className="pen-draft" pointerEvents="none"><path d={bezierPath(draftPoints, draftHandles, false)} fill="none" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />{draftPoints.map((point, index) => { const handle = draftHandles[index]; return handle && (handle.x || handle.y) ? <line key={`handle-${index}`} x1={point.x - handle.x} y1={point.y - handle.y} x2={point.x + handle.x} y2={point.y + handle.y} stroke={ACCENT} vectorEffect="non-scaling-stroke" /> : null })}{draftPoints.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r={index === 0 && draftPoints.length >= 3 ? 9 : 6} fill="white" stroke={ACCENT} strokeWidth="2" vectorEffect="non-scaling-stroke" />)}</g>}
           {!props.builder && props.selectedIds.length > 1 && props.layers.filter((layer) => props.selectedIds.includes(layer.id) && layer.visible && !layer.isEmpty).map((layer) => <rect key={`multi-${layer.id}`} x={layer.x} y={layer.y} width={Math.max(layer.width, 1)} height={Math.max(layer.height, 1)} transform={layerTransform(layer)} fill="none" stroke={ACCENT} strokeWidth={1 / zoomRatio} strokeDasharray={`${5 / zoomRatio} ${4 / zoomRatio}`} vectorEffect="non-scaling-stroke" pointerEvents="none" />)}
+          {!props.builder && multiBounds && props.activeTool === 'select' && <SelectionOverlay layer={multiBounds} mode="select" cornersOnly handleScale={props.documentMeta.width / Math.max(1, fitWidth * zoomRatio)} strokeScale={1 / zoomRatio} onResize={(event, handle) => startMultiTransform(event, 'resize', handle)} onRotate={(event) => startMultiTransform(event, 'rotate')} onCorner={() => {}} onCrop={() => {}} />}
           {props.selectedIds.length === 1 && props.selected?.visible && !props.selected.isEmpty && props.editingTextId !== props.selected.id && (
             <SelectionOverlay
               layer={props.selected}
@@ -3420,8 +3528,8 @@ function LayerDefinition({ layer }: { layer: DesignLayer }) {
     <>
       {(layer.fillType === 'linear' || layer.fillType === 'radial') && layer.gradient && (
         layer.gradient.type === 'linear'
-          ? <linearGradient id={`gradient-${layer.id}`} x1="0" y1="0.5" x2="1" y2="0.5" gradientTransform={`rotate(${layer.gradient.angle} .5 .5)`}>{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} />)}</linearGradient>
-          : <radialGradient id={`gradient-${layer.id}`} cx="50%" cy="50%" r="70%">{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} />)}</radialGradient>
+          ? <linearGradient id={`gradient-${layer.id}`} x1="0" y1="0.5" x2="1" y2="0.5" gradientTransform={`rotate(${layer.gradient.angle} .5 .5)`}>{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} stopOpacity={stop.opacity ?? 1} />)}</linearGradient>
+          : <radialGradient id={`gradient-${layer.id}`} cx="50%" cy="50%" r="70%">{layer.gradient.stops.map((stop, index) => <stop key={index} offset={`${stop.offset * 100}%`} stopColor={stop.color} stopOpacity={stop.opacity ?? 1} />)}</radialGradient>
       )}
       {layer.type === 'image' && <clipPath id={`clip-${layer.id}`}>
         {mask === 'ellipse'
@@ -3959,7 +4067,7 @@ function starPoints(cx: number, cy: number, outer: number, inner: number) {
   }).join(' ')
 }
 
-function SelectionOverlay({ layer, mode, handleScale, strokeScale, onResize, onRotate, onCorner, onCrop }: {
+function SelectionOverlay({ layer, mode, handleScale, strokeScale, onResize, onRotate, onCorner, onCrop, cornersOnly = false }: {
   layer: DesignLayer
   mode: Tool
   handleScale: number
@@ -3968,6 +4076,7 @@ function SelectionOverlay({ layer, mode, handleScale, strokeScale, onResize, onR
   onRotate: (event: ReactPointerEvent) => void
   onCorner: (event: ReactPointerEvent) => void
   onCrop: (event: ReactPointerEvent) => void
+  cornersOnly?: boolean
 }) {
   const height = Math.max(layer.height, 2)
   const cx = layer.x + layer.width / 2
@@ -3994,11 +4103,11 @@ function SelectionOverlay({ layer, mode, handleScale, strokeScale, onResize, onR
       <rect x={layer.x} y={layer.y} width={layer.width} height={height} fill={cropMode ? 'rgba(91,75,240,.04)' : 'none'} stroke={ACCENT} strokeWidth={strokeScale} strokeDasharray={cropMode ? `${8 * strokeScale} ${5 * strokeScale}` : undefined} vectorEffect="non-scaling-stroke" pointerEvents={cropMode ? 'all' : 'none'} onPointerDown={cropMode ? onCrop : undefined} />
       {standard && <>
         <line x1={cx} y1={layer.y} x2={cx} y2={layer.y - 30 * handleScale} stroke={ACCENT} strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" pointerEvents="none" />
-        <g onPointerDown={onRotate} style={{ cursor: 'grab', pointerEvents: 'all' }}>
+        <g data-rotate-handle="true" onPointerDown={onRotate} style={{ cursor: 'grab', pointerEvents: 'all' }}>
           <circle cx={cx} cy={layer.y - 36 * handleScale} r={22 * handleScale} fill="transparent" />
           <circle cx={cx} cy={layer.y - 36 * handleScale} r={5 * handleScale} fill="white" stroke={ACCENT} strokeWidth={strokeScale} vectorEffect="non-scaling-stroke" />
         </g>
-        {handles.map((handle) => {
+        {handles.filter((handle) => !cornersOnly || !handle.side).map((handle) => {
           const width = (handle.side === 'vertical' ? 6 : handle.side === 'horizontal' ? 14 : 8) * handleScale * handleVisualScale
           const handleHeight = (handle.side === 'vertical' ? 14 : handle.side === 'horizontal' ? 6 : 8) * handleScale * handleVisualScale
           const hitSize = 44 * handleScale
@@ -4600,6 +4709,7 @@ function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: Des
     if (type === 'solid' || type === 'none') onUpdate({ fillType: type })
     else onUpdate({ fillType: type, gradient: { ...gradient, type } })
   }
+  const setStopOpacity = (index: number, opacity: number) => onUpdate({ fillType, gradient: { ...gradient, stops: gradient.stops.map((stop, stopIndex) => stopIndex === index ? { ...stop, opacity: clamp(opacity / 100, 0, 1) } : stop) } })
   const setStop = (index: number, color: string) => {
     onUpdate({ fillType, gradient: { ...gradient, stops: gradient.stops.map((stop, stopIndex) => stopIndex === index ? { ...stop, color } : stop) } })
   }
@@ -4611,8 +4721,8 @@ function FillEditor({ layer, onUpdate, onPickColor, imagePalette }: { layer: Des
       {fillType === 'none' ? <p className="no-fill-note">No fill. Choose a colour to restore it.</p> : fillType === 'solid'
         ? <ColorInput onPickColor={onPickColor} label="Fill" value={layer.fill} onChange={(fill) => onUpdate({ fill, fillType: 'solid' })} />
         : <>
-          <div className="gradient-preview" style={{ background: gradient.type === 'radial' ? `radial-gradient(circle, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` : `linear-gradient(${gradient.angle}deg, ${gradient.stops.map((stop) => `${stop.color} ${stop.offset * 100}%`).join(', ')})` }} />
-          <div className="gradient-stops">{gradient.stops.map((stop, index) => <div key={index}><ColorInput onPickColor={onPickColor} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} />{imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={stop.color} onChange={(color) => setStop(index, color)} /></>}</div>)}</div>
+          <div className="gradient-preview" style={{ background: gradient.type === 'radial' ? `radial-gradient(circle, ${gradient.stops.map((stop) => `${normalizeColor(stop.color)}${Math.round(clamp(stop.opacity ?? 1, 0, 1) * 255).toString(16).padStart(2, '0')} ${stop.offset * 100}%`).join(', ')})` : `linear-gradient(${gradient.angle}deg, ${gradient.stops.map((stop) => `${normalizeColor(stop.color)}${Math.round(clamp(stop.opacity ?? 1, 0, 1) * 255).toString(16).padStart(2, '0')} ${stop.offset * 100}%`).join(', ')})` }} />
+          <div className="gradient-stops">{gradient.stops.map((stop, index) => <div key={index}><ColorInput onPickColor={onPickColor} label={index === 0 ? 'Start' : 'End'} value={stop.color} onChange={(color) => setStop(index, color)} /><SliderField label={`${index === 0 ? 'Start' : 'End'} opacity`} value={Math.round((stop.opacity ?? 1) * 100)} min={0} max={100} unit="%" onChange={(value) => setStopOpacity(index, value)} />{imagePalette && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={stop.color} onChange={(color) => setStop(index, color)} /></>}</div>)}</div>
           {gradient.type === 'linear' && <SliderField label="Angle" value={gradient.angle} min={-360} max={360} unit="°" onChange={(angle) => onUpdate({ gradient: { ...gradient, angle } })} />}
         </>}
       {imagePalette && (fillType === 'solid' || fillType === 'none') && <><div className="field-caption">Image palette</div><ColourPalette colors={imagePalette.colors} value={fillType === 'none' ? '' : layer.fill} onChange={(color) => onUpdate({ fill: color, fillType: 'solid' })} /></>}
@@ -5272,7 +5382,8 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   ] },
   { title: 'Layers and multiple selection', keywords: 'layers order arrange lock visibility duplicate clip group assets', paragraphs: [
     'Open Layers from the bottom toolbar on a phone or the left panel on desktop. A normal tap or click selects one layer. Drag layer rows to reorder; use the visibility and lock controls to hide or protect a layer. The plus button creates an empty layer, and Assets contains built-in shapes.',
-    'Long-press a layer on a phone or right-click it on desktop to start multiple selection, then select more rows. Choose Done selecting to exit. Desktop modifier selection also works on the canvas. Use the available group controls for common operations.',
+    'Long-press a layer on a phone or right-click it on desktop to start multiple selection, then select more rows. Choose Group layers to make a flat selection group. Select or ungroup it from the group list in Layers. The pencil beside a layer name renames it.',
+    'Selected visible, unlocked layers can move together, resize proportionally using shared corner handles, or rotate around their shared centre. Scale and rotate buttons provide keyboard access. Nested groups and side-only multi-selection resize are not supported.',
     'With adjacent opaque solid-filled vector shapes selected, choose Shape builder. Drag across highlighted regions, choose Merge or Remove, then Apply. On the keyboard, focus the artboard, use arrows (Shift for larger steps) and Enter to toggle regions. Cancel leaves the sources unchanged.',
     'With multiple shapes selected, Unite, Subtract, Intersect and Exclude create a compound path. Subtract removes upper selected shapes from the lowest selected shape. Curves are approximated, and the operation replaces its inputs; Undo restores them.',
     'For a blend, select two matching solid-colour shapes, set Steps and choose Create blend. The intermediate shapes are separate editable layers; editing an endpoint does not regenerate them. Masks, effects, images and text are not supported by this blend.',
@@ -5284,6 +5395,7 @@ const helpTopics: { title: string; keywords: string; paragraphs: string[] }[] = 
   ] },
   { title: 'Shapes, colour and effects', keywords: 'rectangle ellipse polygon star fill stroke opacity gradient blur palette', paragraphs: [
     'Choose Shapes on a phone or a shape tool on desktop. The Assets panel offers more built-in shapes. Select a shape and use Edit or Fill for its quick toolbar. Choose No fill and set a stroke colour and width independently; choose Solid, Dashed or Dotted under Pattern. More opens detailed settings such as gradients.',
+    'For a linear or radial fill, adjust Start opacity and End opacity independently in Fill. These settings are saved and exported with the gradient.',
     'In Properties, Fx · Layer effects provides non-destructive drop shadow, inner glow, outer glow and an approximate bevel. Each effect can be enabled and adjusted independently; the effects remain editable in .pocket files and are included in exports.',
     'Use colour controls to choose a colour or sample one from the canvas. Properties also provide alignment, blend and blur effects where supported. Image palette extracts colours from a selected image.'
   ] },
@@ -5627,7 +5739,7 @@ function buildSvg(layers: DesignLayer[], meta: DesignDocument, includeBackground
       definition += `<filter id="blur-${layer.id}" filterUnits="userSpaceOnUse" x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" color-interpolation-filters="sRGB"><feGaussianBlur stdDeviation="${layer.blur.amount}"/></filter>`
     }
     if ((layer.fillType === 'linear' || layer.fillType === 'radial') && layer.gradient) {
-      const stops = layer.gradient.stops.map((stop) => `<stop offset="${stop.offset * 100}%" stop-color="${stop.color}"/>`).join('')
+      const stops = layer.gradient.stops.map((stop) => `<stop offset="${stop.offset * 100}%" stop-color="${stop.color}" stop-opacity="${clamp(stop.opacity ?? 1, 0, 1)}"/>`).join('')
       definition += layer.gradient.type === 'linear'
         ? `<linearGradient id="gradient-${layer.id}" x1="0" y1="0.5" x2="1" y2="0.5" gradientTransform="rotate(${layer.gradient.angle} .5 .5)">${stops}</linearGradient>`
         : `<radialGradient id="gradient-${layer.id}" cx="50%" cy="50%" r="70%">${stops}</radialGradient>`

@@ -56,7 +56,7 @@ Use the pen toolbar to switch between Straight and Curve. In Straight mode, clic
 
 In Layers, Add layer creates an empty layer. Select it before adding a shape or text, drawing a pen path, or painting to use that layer. The Assets tab contains built-in shapes that work offline. The colour Brush paints on the selected paint or empty layer, or creates a paint layer when another kind of layer is selected. Use the foreground and background colour pickers and Swap, plus size, opacity, flow, and hardness controls. Soft and Hard presets set the edge, and the hardness slider provides intermediate settings. Select a mask thumbnail to switch the brush into masking mode; finish masking before returning to colour painting.
 
-A normal tap or click on a layer selects only that layer. To select multiple layers from Layers, long-press a layer on mobile or right-click a layer on desktop, then tap or click additional layers. Use Done selecting to exit this mode. On the canvas, Shift or Ctrl/Command also adds or removes layers from the selection. Dragging a selected layer moves unlocked selected layers together; Delete removes the unlocked selection. Shared property controls apply common changes to the selection. Group resize and rotation handles are not yet available; individual layer handles are hidden while multiple layers are selected. Right-click a layer row for Select, Modify, and Delete.
+A normal tap or click on a layer selects only that layer. To select multiple layers from Layers, long-press a layer on mobile or right-click a layer on desktop, then tap or click additional layers. Use Done selecting to exit this mode. On the canvas, Shift or Ctrl/Command also adds or removes layers from the selection. Dragging a selected layer moves unlocked selected layers together; Delete removes the unlocked selection. Shared property controls apply common changes to the selection. A shared bounding box provides proportional corner resizing and rotation for visible, unlocked selections; individual layer handles are hidden while multiple layers are selected. Right-click a layer row for Select, Modify, and Delete.
 
 On mobile, select text and tap Style to open the horizontally scrollable toolbar above the canvas. Alignment, size, formatting and X/Y position are available there; More opens detailed properties. Other selected objects also have a compact positioning toolbar. Some advanced controls still use sheets.
 
@@ -145,3 +145,13 @@ Select an unlocked image and choose **Camera raw filter** in the desktop tool ra
 On mobile, dragging a slider in the Properties sheet temporarily lowers the sheet opacity and removes its dark backdrop so the canvas is easier to see. The sheet returns to normal when the drag ends or is cancelled.
 
 Exporting **Project** links the chosen `.pocket` file to Save when the browser permits direct file access. Exporting another project or using Save project file as selects a new target. On browsers without this capability, Project export and Save download separate copies; a website cannot silently overwrite a downloaded file.
+
+### Gradient opacity, groups and shared transforms
+
+In a shape’s Fill controls, choose Linear or Radial and set **Start opacity** and **End opacity** independently. Older gradients without opacity values remain fully opaque. Gradient opacity is saved with the project and included in SVG and raster exports.
+
+Use the pencil button on a layer row to rename it. Press Enter or leave the field to save the name; Escape cancels. Names remain editable and are saved with the project.
+
+Start multiple selection by long-pressing a layer on mobile or right-clicking on desktop, select more layers, and choose **Group layers** in the selection bar. Groups appear above the Layers list: select a group to select all its members, or choose Ungroup. Group membership is saved in editable project files. This is a flat selection group, not a nested layer folder or an isolated compositing group; individual members remain independently editable and reorderable.
+
+Select multiple visible, unlocked layers (or a group) to move them together. Use the shared corner handles to resize proportionally and the rotation handle to rotate them around their shared centre. The selection toolbar also provides Scale up/down and Rotate left/right buttons for keyboard and touch access. Side-only resizing of a multi-selection and nested groups are not supported. A selection containing hidden, locked or empty layers does not show shared transform handles.
